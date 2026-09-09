@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+TOOL="${XRAY_PROFILE_TOOL:-/usr/libexec/xray-profile-tool.uc}"
+LOCK_FILE="/var/lock/xray-profile-probe.lock"
+
+profile="${1:?profile path is required}"
+port="${2:-10818}"
+probe_url="${3:-https://dns.google/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE}"
+request_timeout="${4:-8}"
+probe_mode="${5:-strict}"
+
+case "$profile" in
+	/etc/xray/profiles/*.json) ;;
+	*)
+		echo "Refusing profile outside /etc/xray/profiles" >&2
+		exit 2
+		;;
+esac
+
+[ -f "$profile" ] || {
+	echo "Missing profile: $profile" >&2
+	exit 2
+}
+
+exec 8>"$LOCK_FILE"
+flock -x 8
+
+umask 077
+probe_config="/tmp/xray-profile-probe.$$.json"
+probe_pid=""
+
+cleanup() {
+	if [ -n "$probe_pid" ]; then
+		kill "$probe_pid" 2>/dev/null || true
+		wait "$probe_pid" 2>/dev/null || true
+	fi
+	rm -f "$probe_config"
+}
+
+trap cleanup EXIT HUP INT TERM
+
+"$TOOL" make-probe "$profile" "$probe_config" "$port"
+chmod 600 "$probe_config"
+xray run -test -c "$probe_config" >/dev/null 2>&1
+
+xray run -c "$probe_config" -format json >/dev/null 2>&1 &
+probe_pid="$!"
+sleep 1
+
+if ! kill -0 "$probe_pid" 2>/dev/null; then
+	echo "Probe Xray exited before the request" >&2
+	exit 1
+fi
+
+case "$probe_mode" in
+	strict)
+		curl --socks5-hostname "127.0.0.1:$port" \
+			-4 -fsS -o /dev/null \
+			--connect-timeout "$request_timeout" \
+			--max-time "$request_timeout" \
+			-H 'accept: application/dns-message' \
+			"$probe_url"
+		;;
+	network)
+		/usr/libexec/xray-route-fetch "$probe_url" "$request_timeout" \
+			/dev/null "$port" >/dev/null
+		;;
+	*)
+		echo "Unknown probe mode: $probe_mode" >&2
+		exit 2
+		;;
+esac

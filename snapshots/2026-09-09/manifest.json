@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "created_at": "2026-09-09T13:01:45.529961+00:00",
+  "board": "glinet,gl-mt6000",
+  "model": "GL.iNet GL-MT6000",
+  "release": "25.12.2",
+  "revision": "r32802-f505120278",
+  "kernel": "6.12.74",
+  "target": "mediatek/filogic",
+  "encrypted_sha256": "8f46894098d94ca0d14b8d982bb688cb362b7f24a3ca1f9d73e480ba3e18f63e",
+  "parts": [
+    {
+      "file": "payload.gpg.part0000",
+      "bytes": 50331648,
+      "sha256": "4e6aa76df27f5453c332115bbbc84050957542b8e0797bb5c451d3b8e744af52"
+    },
+    {
+      "file": "payload.gpg.part0001",
+      "bytes": 50331648,
+      "sha256": "962bf98bb0679147348369e1f0ea3bd817b065f808917f5fc88519201465f759"
+    },
+    {
+      "file": "payload.gpg.part0002",
+      "bytes": 50331648,
+      "sha256": "5babb3d6d7f71a5b9d714637998787019bb1df118cd3fe6eb3c49c80328ec39b"
+    },
+    {
+      "file": "payload.gpg.part0003",
+      "bytes": 50331648,
+      "sha256": "6e7a644eb71e9085ad08b6a12b7f137860749c6b7fb1f9df0300ee5722c24860"
+    },
+    {
+      "file": "payload.gpg.part0004",
+      "bytes": 50331648,
+      "sha256": "5c0b6ae4b621907da32a67f66779551a6f75a9fffc8fb161f775446131036a69"
+    },
+    {
+      "file": "payload.gpg.part0005",
+      "bytes": 7526483,
+      "sha256": "93942cc7957f11682d441868c9ed477b4113f82b72251fdfc8341868473e5aca"
+    }
+  ],
+  "package_count": 204,
+  "includes_local_history": true
+}

@@ -1,0 +1,191 @@
+#!/bin/sh
+set -eu
+
+PROFILE_PROBE="/usr/libexec/xray-profile-probe"
+ROUTE_COMMAND="/usr/libexec/xray-route-domain"
+candidate_domain="${1:-}"
+set -- /etc/xray/profiles/main-*.json
+[ "$#" -eq 1 ] && [ -f "$1" ] || exit 2
+MAIN_NAME="${1##*/}"
+MAIN_NAME="${MAIN_NAME%.json}"
+BACKUP_NAME="backup-spacevpn-nl"
+BACKUP2_NAME="backup-spacevpn-de"
+MAIN_PROFILE="/etc/xray/profiles/$MAIN_NAME.json"
+BACKUP_PROFILE="/etc/xray/profiles/$BACKUP_NAME.json"
+BACKUP2_PROFILE="/etc/xray/profiles/$BACKUP2_NAME.json"
+ACTIVE_FILE="/etc/xray/active-profile"
+FETCH="/usr/libexec/xray-route-fetch"
+RESOURCES="/usr/libexec/xray-route-resources.uc"
+STATE_DIR="/var/run/xray-route-learner"
+LOCK_FILE="/var/lock/xray-route-learner-check.lock"
+TAG="xray-route-learner"
+
+config_value() {
+	local option="$1"
+	local fallback="$2"
+	local value
+	value="$(uci -q get "xray-route-learner.main.$option" 2>/dev/null || true)"
+	printf '%s\n' "${value:-$fallback}"
+}
+
+positive_integer() {
+	case "$1" in
+		''|*[!0-9]*|0) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+normalize_domain() {
+	local value
+	value="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+	value="${value%.}"
+	[ "${#value}" -le 253 ] || return 1
+	printf '%s\n' "$value" | grep -Eq \
+		'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' || return 1
+	printf '%s\n' "$value" | grep -q '\.' || return 1
+	printf '%s\n' "$value" | grep -q '[a-z]' || return 1
+	case "$value" in
+		localhost|*.lan|*.local|home.arpa|*.home.arpa) return 1 ;;
+	esac
+	printf '%s\n' "$value"
+}
+
+remember_until() {
+	local epoch="$1"
+	local temporary="${state_file}.new.$$"
+	printf '%s\nresources-v1\n' "$epoch" >"$temporary"
+	chmod 600 "$temporary"
+	mv "$temporary" "$state_file"
+}
+
+
+domain="$(normalize_domain "$candidate_domain")" || exit 2
+
+ENABLED="$(config_value enabled 1)"
+[ "$ENABLED" = "1" ] || exit 0
+DIRECT_ATTEMPTS="$(config_value direct_attempts 2)"
+PROXY_ATTEMPTS="$(config_value proxy_attempts 2)"
+REQUEST_TIMEOUT="$(config_value request_timeout 8)"
+RETRY_DELAY="$(config_value retry_delay 2)"
+ACCESSIBLE_COOLDOWN="$(config_value accessible_cooldown 21600)"
+FAILED_COOLDOWN="$(config_value failed_cooldown 300)"
+PROBE_SOCKS_PORT="$(config_value probe_socks_port 10818)"
+
+for value in "$DIRECT_ATTEMPTS" "$PROXY_ATTEMPTS" "$REQUEST_TIMEOUT" \
+	"$RETRY_DELAY" "$ACCESSIBLE_COOLDOWN" "$FAILED_COOLDOWN" \
+	"$PROBE_SOCKS_PORT"; do
+	positive_integer "$value" || {
+		logger -t "$TAG" -p daemon.err "Invalid numeric configuration value: $value"
+		exit 2
+	}
+done
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+state_file="$STATE_DIR/$domain.next"
+
+exec 8>"$LOCK_FILE"
+flock -x 8
+
+now="$(date +%s)"
+# Old one-byte checks cannot suppress the new resource checks for six hours.
+version="$(sed -n '2p' "$state_file" 2>/dev/null || true)"
+next_check="$(sed -n '1p' "$state_file" 2>/dev/null || true)"
+case "$next_check" in
+	''|*[!0-9]*) next_check=0 ;;
+esac
+[ "$version" != resources-v1 ] || [ "$now" -ge "$next_check" ] || exit 0
+
+token="domain:$domain"
+main_has="0"
+backup_has="0"
+backup2_has="0"
+jsonfilter -i "$MAIN_PROFILE" -e '@.routing.rules[*].domain[*]' 2>/dev/null | \
+	grep -Fxq "$token" && main_has="1"
+jsonfilter -i "$BACKUP_PROFILE" -e '@.routing.rules[*].domain[*]' 2>/dev/null | \
+	grep -Fxq "$token" && backup_has="1"
+jsonfilter -i "$BACKUP2_PROFILE" -e '@.routing.rules[*].domain[*]' 2>/dev/null | \
+	grep -Fxq "$token" && backup2_has="1"
+if [ "$main_has" = "1" ] && [ "$backup_has" = "1" ] && [ "$backup2_has" = "1" ]; then
+	remember_until $((now + ACCESSIBLE_COOLDOWN))
+	exit 0
+fi
+
+umask 077
+workdir="$(mktemp -d /tmp/xray-route-check.XXXXXX)"
+trap 'rm -f "$workdir/body" "$workdir/urls"; rmdir "$workdir"' EXIT
+trap 'exit 1' HUP INT TERM
+
+probe_url="https://$domain/"
+status=0
+metadata="$("$FETCH" "$probe_url" "$REQUEST_TIMEOUT" "$workdir/body")" || status=$?
+if [ "$status" = 0 ]; then
+	case "$metadata" in
+		*text/html*|*application/xhtml+xml*)
+			"$RESOURCES" "$domain" "$workdir/body" >"$workdir/urls"
+			while IFS= read -r resource; do
+				status=0
+				"$FETCH" "$resource" "$REQUEST_TIMEOUT" >/dev/null || status=$?
+				if [ "$status" = 1 ]; then
+					probe_url="$resource"
+					break
+				fi
+			done <"$workdir/urls"
+			;;
+	esac
+fi
+if [ "$status" != 1 ]; then
+	remember_until $((now + ACCESSIBLE_COOLDOWN))
+	logger -t "$TAG" -p daemon.info "Candidate $domain has no confirmed transport failure; resource cooldown applied"
+	exit 0
+fi
+
+# Confirm the SAME failed URL; a healthy root cannot disprove an asset stall.
+attempt=1
+while [ "$attempt" -lt "$DIRECT_ATTEMPTS" ]; do
+	sleep "$RETRY_DELAY"
+	status=0
+	"$FETCH" "$probe_url" "$REQUEST_TIMEOUT" >/dev/null || status=$?
+	if [ "$status" != 1 ]; then
+		remember_until $((now + FAILED_COOLDOWN))
+		logger -t "$TAG" -p daemon.info "Candidate $domain did not reproduce the transport failure"
+		exit 0
+	fi
+	attempt=$((attempt + 1))
+done
+
+active_profile="$(sed -n '1p' "$ACTIVE_FILE" 2>/dev/null || true)"
+case "$active_profile" in
+	"$MAIN_NAME") probe_profile="$MAIN_PROFILE" ;;
+	"$BACKUP_NAME") probe_profile="$BACKUP_PROFILE" ;;
+	"$BACKUP2_NAME") probe_profile="$BACKUP2_PROFILE" ;;
+	*)
+		remember_until $((now + FAILED_COOLDOWN))
+		logger -t "$TAG" -p daemon.warning \
+			"Cannot probe $domain: active profile is custom/unknown"
+		exit 1
+		;;
+esac
+
+attempt=1
+while [ "$attempt" -le "$PROXY_ATTEMPTS" ]; do
+	if ! "$PROFILE_PROBE" "$probe_profile" "$PROBE_SOCKS_PORT" \
+		"$probe_url" "$REQUEST_TIMEOUT" network; then
+		remember_until $((now + FAILED_COOLDOWN))
+		logger -t "$TAG" -p daemon.info \
+			"Candidate $domain failed the forced-Xray verification"
+		exit 0
+	fi
+	[ "$attempt" -ge "$PROXY_ATTEMPTS" ] || sleep "$RETRY_DELAY"
+	attempt=$((attempt + 1))
+done
+
+if "$ROUTE_COMMAND" add "$domain" auto >/dev/null; then
+	remember_until $((now + ACCESSIBLE_COOLDOWN))
+	logger -t "$TAG" -p daemon.notice \
+		"Learned $domain: same resource failed direct ${DIRECT_ATTEMPTS}x, Xray succeeded ${PROXY_ATTEMPTS}x"
+else
+	remember_until $((now + FAILED_COOLDOWN))
+	logger -t "$TAG" -p daemon.err "Failed to add learned domain $domain"
+	exit 1
+fi

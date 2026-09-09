@@ -1,0 +1,300 @@
+#!/bin/sh
+set -eu
+
+PROFILE_DIR="/etc/xray/profiles"
+ACTIVE_FILE="/etc/xray/active-profile"
+LIVE_CONFIG="/etc/xray/config.json"
+MAIN_FILE="$(printf '%s\n' /etc/xray/profiles/main-*.json)"
+MAIN_NAME="${MAIN_FILE##*/}"
+MAIN_NAME="${MAIN_NAME%.json}"
+BACKUP_NAME="backup-spacevpn-nl"
+BACKUP2_NAME="backup-spacevpn-de"
+BACKUP_FILE="$PROFILE_DIR/$BACKUP_NAME.json"
+BACKUP2_FILE="$PROFILE_DIR/$BACKUP2_NAME.json"
+WATCHDOG_SERVICE="xray-profile-watchdog"
+LEARNER_SERVICE="xray-route-learner"
+LOCK_FILE="/var/lock/xray-profile.lock"
+AUTO_LIST="/etc/xray/auto-proxy-domains"
+ROUTE_DOMAIN_COMMAND="/usr/libexec/xray-route-domain"
+lock_held="0"
+
+print_usage() {
+    cat <<'EOF'
+Usage:
+  xray-profile status
+  xray-profile main
+  xray-profile backup
+  xray-profile backup2
+  xray-profile local
+  xray-profile off
+  xray-profile list
+  xray-profile learned
+  xray-profile forget DOMAIN
+EOF
+}
+
+resolve_profile_file() {
+    case "$1" in
+        main|primary|$MAIN_NAME)
+            printf '%s\n' "$MAIN_FILE"
+            ;;
+        backup|reserve|backup1|nl|$BACKUP_NAME)
+            printf '%s\n' "$BACKUP_FILE"
+            ;;
+        backup2|de|$BACKUP2_NAME)
+            printf '%s\n' "$BACKUP2_FILE"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+resolve_profile_name() {
+    case "$1" in
+        "$MAIN_FILE") printf '%s\n' "$MAIN_NAME" ;;
+        "$BACKUP_FILE") printf '%s\n' "$BACKUP_NAME" ;;
+        "$BACKUP2_FILE") printf '%s\n' "$BACKUP2_NAME" ;;
+        *) return 1 ;;
+    esac
+}
+
+infer_current_profile() {
+    if cmp -s "$LIVE_CONFIG" "$MAIN_FILE" 2>/dev/null; then
+        printf '%s\n' "$MAIN_NAME"
+        return 0
+    fi
+    if cmp -s "$LIVE_CONFIG" "$BACKUP_FILE" 2>/dev/null; then
+        printf '%s\n' "$BACKUP_NAME"
+        return 0
+    fi
+    if cmp -s "$LIVE_CONFIG" "$BACKUP2_FILE" 2>/dev/null; then
+        printf '%s\n' "$BACKUP2_NAME"
+        return 0
+    fi
+    return 1
+}
+
+service_enabled() {
+    /etc/init.d/"$1" enabled >/dev/null 2>&1
+}
+
+service_status() {
+    case "$1" in
+        xray-split)
+            if ip rule show 2>/dev/null | grep -q 'fwmark 0x1.*lookup 100'; then
+                printf '%s\n' "active"
+            else
+                printf '%s\n' "inactive"
+            fi
+            ;;
+        *)
+            if /etc/init.d/"$1" status >/dev/null 2>&1; then
+                printf '%s\n' "active"
+            else
+                printf '%s\n' "inactive"
+            fi
+            ;;
+    esac
+}
+
+show_service_line() {
+    local service="$1"
+    local enabled="no"
+    if service_enabled "$service"; then
+        enabled="yes"
+    fi
+    printf '  %-24s runtime=%-8s autostart=%s\n' "$service" "$(service_status "$service")" "$enabled"
+}
+
+show_status() {
+    echo "Available profiles:"
+    echo "  main   -> $MAIN_NAME"
+    echo "  backup -> $BACKUP_NAME"
+    echo "  backup2 -> $BACKUP2_NAME"
+
+    if [ -f "$ACTIVE_FILE" ]; then
+        echo "Recorded active profile: $(cat "$ACTIVE_FILE")"
+    else
+        echo "Recorded active profile: unknown"
+    fi
+
+    if current="$(infer_current_profile)"; then
+        echo "Detected live profile:   $current"
+    else
+        echo "Detected live profile:   custom/unknown"
+    fi
+
+    echo "Services:"
+    show_service_line xray
+    show_service_line xray-split
+    show_service_line https-dns-proxy
+    if [ -x "/etc/init.d/$WATCHDOG_SERVICE" ]; then
+        show_service_line "$WATCHDOG_SERVICE"
+    fi
+    if [ -x /etc/init.d/xray-route-learner ]; then
+        show_service_line xray-route-learner
+    fi
+    if [ -f "$AUTO_LIST" ]; then
+        learned_count="$(sed '/^[[:space:]]*$/d' "$AUTO_LIST" | wc -l | tr -d ' ')"
+        echo "Auto-learned domains: ${learned_count:-0}"
+    fi
+}
+
+restart_if_enabled() {
+    local service="$1"
+    if service_enabled "$service"; then
+        echo "Restarting $service ..."
+        if ! /etc/init.d/"$service" restart; then
+            if /etc/init.d/"$service" status >/dev/null 2>&1; then
+                echo "Restart command for $service returned non-zero, but the service is active." >&2
+            else
+                echo "Warning: failed to restart $service" >&2
+                return 1
+            fi
+        fi
+    else
+        echo "Skipping $service; autostart is disabled."
+    fi
+}
+
+start_watchdog_if_enabled() {
+    if [ -x "/etc/init.d/$WATCHDOG_SERVICE" ] && \
+       service_enabled "$WATCHDOG_SERVICE" && \
+       ! /etc/init.d/"$WATCHDOG_SERVICE" status >/dev/null 2>&1; then
+        echo "Starting $WATCHDOG_SERVICE ..."
+        /etc/init.d/"$WATCHDOG_SERVICE" start
+    fi
+}
+
+start_learner_if_enabled() {
+    if [ -x "/etc/init.d/$LEARNER_SERVICE" ] && \
+       service_enabled "$LEARNER_SERVICE" && \
+       ! /etc/init.d/"$LEARNER_SERVICE" status >/dev/null 2>&1; then
+        echo "Starting $LEARNER_SERVICE ..."
+        /etc/init.d/"$LEARNER_SERVICE" start
+    fi
+}
+
+acquire_lock() {
+    exec 9>"$LOCK_FILE"
+    flock -x 9
+    lock_held="1"
+}
+
+release_lock() {
+    if [ "$lock_held" = "1" ]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
+        lock_held="0"
+    fi
+}
+
+apply_profile() {
+    target_file="$(resolve_profile_file "$1")" || {
+        echo "Unknown profile: $1" >&2
+        print_usage >&2
+        exit 1
+    }
+
+    target_name="$(resolve_profile_name "$target_file")"
+
+    if [ ! -f "$target_file" ]; then
+        echo "Missing profile file: $target_file" >&2
+        exit 1
+    fi
+
+    acquire_lock
+
+    echo "Testing $target_name ..."
+    xray run -test -c "$target_file"
+
+    umask 077
+    rollback_config="/tmp/xray-profile-rollback-config.$$"
+    rollback_active="/tmp/xray-profile-rollback-active.$$"
+    had_active="0"
+    cp "$LIVE_CONFIG" "$rollback_config"
+    if [ -f "$ACTIVE_FILE" ]; then
+        cp "$ACTIVE_FILE" "$rollback_active"
+        had_active="1"
+    fi
+
+    cleanup_rollback() {
+        rm -f "$rollback_config" "$rollback_active"
+        release_lock
+    }
+    trap cleanup_rollback EXIT HUP INT TERM
+
+    echo "Applying $target_name ..."
+    cp "$target_file" "$LIVE_CONFIG"
+    printf '%s\n' "$target_name" > "$ACTIVE_FILE"
+
+    if ! restart_if_enabled xray; then
+        echo "Restoring previous live config after failed Xray restart ..." >&2
+        cp "$rollback_config" "$LIVE_CONFIG"
+        if [ "$had_active" = "1" ]; then
+            cp "$rollback_active" "$ACTIVE_FILE"
+        else
+            rm -f "$ACTIVE_FILE"
+        fi
+        /etc/init.d/xray restart >/dev/null 2>&1 || true
+        exit 1
+    fi
+
+    restart_if_enabled xray-split || true
+    restart_if_enabled https-dns-proxy || true
+    start_watchdog_if_enabled
+    start_learner_if_enabled
+
+    cleanup_rollback
+    trap - EXIT HUP INT TERM
+    echo "Done. Active profile: $target_name"
+}
+
+stop_router_mode() {
+    if [ -x "/etc/init.d/$LEARNER_SERVICE" ]; then
+        /etc/init.d/"$LEARNER_SERVICE" stop 2>/dev/null || true
+    fi
+    if [ -x "/etc/init.d/$WATCHDOG_SERVICE" ]; then
+        /etc/init.d/"$WATCHDOG_SERVICE" stop 2>/dev/null || true
+    fi
+    acquire_lock
+    echo "Stopping router Xray services for local V2RayTun mode ..."
+    /etc/init.d/https-dns-proxy stop 2>/dev/null || true
+    /etc/init.d/xray-split stop 2>/dev/null || true
+    /etc/init.d/xray stop 2>/dev/null || true
+    release_lock
+    echo "Done. Router Xray runtime is off; autostart settings are unchanged."
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+    status)
+        show_status
+        ;;
+    list)
+        echo "$MAIN_NAME"
+        echo "$BACKUP_NAME"
+        echo "$BACKUP2_NAME"
+        ;;
+    learned)
+        "$ROUTE_DOMAIN_COMMAND" list
+        ;;
+    forget)
+        [ -n "${2:-}" ] || {
+            echo "Domain is required." >&2
+            exit 2
+        }
+        "$ROUTE_DOMAIN_COMMAND" remove "$2"
+        ;;
+    main|primary|backup|reserve|backup1|backup2|nl|de|$MAIN_NAME|$BACKUP_NAME|$BACKUP2_NAME)
+        apply_profile "$cmd"
+        ;;
+    local|off)
+        stop_router_mode
+        ;;
+    *)
+        print_usage >&2
+        exit 1
+        ;;
+esac

@@ -1,0 +1,274 @@
+#!/bin/sh
+set -eu
+
+TOOL="/usr/libexec/xray-profile-tool.uc"
+MAIN_PROFILE="$(printf '%s\n' /etc/xray/profiles/main-*.json)"
+MAIN_NAME="${MAIN_PROFILE##*/}"
+MAIN_NAME="${MAIN_NAME%.json}"
+BACKUP_NAME="backup-spacevpn-nl"
+BACKUP2_NAME="backup-spacevpn-de"
+BACKUP_PROFILE="/etc/xray/profiles/$BACKUP_NAME.json"
+BACKUP2_PROFILE="/etc/xray/profiles/$BACKUP2_NAME.json"
+LIVE_CONFIG="/etc/xray/config.json"
+ACTIVE_FILE="/etc/xray/active-profile"
+AUTO_LIST="/etc/xray/auto-proxy-domains"
+LOCK_FILE="/var/lock/xray-profile.lock"
+TAG="xray-route-learner"
+ROUTE_API="127.0.0.1:10085"
+export XRAY_LOCATION_ASSET="${XRAY_LOCATION_ASSET:-$(uci -q get xray.config.datadir || printf '%s' /usr/share/xray)}"
+
+usage() {
+	echo "Usage: xray-route-domain add DOMAIN [auto|manual]" >&2
+	echo "       xray-route-domain remove DOMAIN [force]" >&2
+	echo "       xray-route-domain list" >&2
+	echo "       xray-route-domain refilter refilter-SHA256.dat" >&2
+}
+
+update_profile() {
+	if [ "$command" != "refilter" ]; then
+		"$TOOL" "$tool_command" "$1" "$2" "$token"
+		return
+	fi
+	# Внешняя база имеет собственное правило; learner продолжает менять ручной список.
+	ucode - "$1" "$2" "$token" <<'UCODE'
+import { readfile, writefile } from 'fs';
+let document = json(readfile(ARGV[0]));
+let rules = filter(document.routing.rules, (rule) => rule.ruleTag != 'auto-refilter-domains');
+let fallback = pop(rules);
+if (fallback.outboundTag != 'direct' || fallback.domain || fallback.ip || fallback.port || fallback.protocol)
+	die('Expected final direct fallback rule');
+push(rules, { type: 'field', ruleTag: 'auto-refilter-domains',
+	domain: [ARGV[2]], outboundTag: 'proxy' }, fallback);
+document.routing.rules = rules;
+if (!writefile(ARGV[1], sprintf('%J\n', document)))
+	die('Cannot write candidate routing');
+UCODE
+}
+
+normalize_domain() {
+	local value
+	value="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+	value="${value%.}"
+
+	[ "${#value}" -le 253 ] || return 1
+	printf '%s\n' "$value" | grep -Eq \
+		'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' || return 1
+	printf '%s\n' "$value" | grep -q '\.' || return 1
+	printf '%s\n' "$value" | grep -q '[a-z]' || return 1
+
+	case "$value" in
+		localhost|*.lan|*.local|home.arpa|*.home.arpa) return 1 ;;
+	esac
+
+	printf '%s\n' "$value"
+}
+
+write_list_candidate() {
+	local operation="$1"
+	local domain="$2"
+	local output="$3"
+
+	case "$operation" in
+		add)
+			{
+				[ ! -f "$AUTO_LIST" ] || sed '/^[[:space:]]*$/d' "$AUTO_LIST"
+				printf '%s\n' "$domain"
+			} | sort -u >"$output"
+			;;
+		remove)
+			if [ -f "$AUTO_LIST" ]; then
+				awk -v domain="$domain" 'NF && $0 != domain { print }' \
+					"$AUTO_LIST" | sort -u >"$output"
+			else
+				: >"$output"
+			fi
+			;;
+	esac
+	chmod 600 "$output"
+}
+
+install_config() {
+	local source="$1"
+	local stage="$2"
+	local target="$3"
+	cp "$source" "$stage"
+	chmod 600 "$stage"
+	mv "$stage" "$target"
+}
+
+restore_configs() {
+	set +e
+	install_config "$workdir/original-main.json" "$main_stage" "$MAIN_PROFILE"
+	install_config "$workdir/original-backup.json" "$backup_stage" "$BACKUP_PROFILE"
+	install_config "$workdir/original-backup2.json" "$backup2_stage" "$BACKUP2_PROFILE"
+	install_config "$workdir/original-live.json" "$live_stage" "$LIVE_CONFIG"
+	if ! xray api adrules --server="$ROUTE_API" "$workdir/original-live.json" \
+		>"$workdir/api-restore.log" 2>&1; then
+		logger -t "$TAG" -p daemon.err "Route rollback API unavailable; saved configs restored, runtime requires checking"
+	fi
+	set -e
+}
+
+release_lock() {
+	if [ "${lock_held:-0}" = "1" ]; then
+		flock -u 9 2>/dev/null || true
+		exec 9>&-
+		lock_held="0"
+	fi
+}
+
+cleanup() {
+	if [ "${transaction_started:-0}" = "1" ]; then
+		restore_configs
+	fi
+	rm -f "${main_stage:-}" "${backup_stage:-}" "${backup2_stage:-}" "${live_stage:-}" \
+		"${list_stage:-}" 2>/dev/null || true
+	if [ -n "${workdir:-}" ] && [ -d "$workdir" ]; then
+		rm -f "$workdir"/* 2>/dev/null || true
+		rmdir "$workdir" 2>/dev/null || true
+	fi
+	release_lock
+}
+
+command="${1:-}"
+
+if [ "$command" = "list" ]; then
+	[ ! -f "$AUTO_LIST" ] || sed '/^[[:space:]]*$/d' "$AUTO_LIST"
+	exit 0
+fi
+
+[ "$command" = "add" ] || [ "$command" = "remove" ] || [ "$command" = "refilter" ] || {
+	usage
+	exit 2
+}
+
+if [ "$command" = "refilter" ]; then
+	domain="${2:-}"
+	printf '%s\n' "$domain" | grep -Eq '^refilter-[a-f0-9]{64}\.dat$' || exit 2
+	[ -s "$XRAY_LOCATION_ASSET/$domain" ] || exit 2
+	token="ext:$domain:refilter"
+else
+	domain="$(normalize_domain "${2:-}")" || {
+		echo "Invalid or local domain: ${2:-}" >&2
+		exit 2
+	}
+	token="domain:$domain"
+fi
+source="${3:-manual}"
+
+case "$command:$source" in
+	add:auto|add:manual|remove:force|refilter:manual) ;;
+	remove:manual)
+		if ! grep -Fxq "$domain" "$AUTO_LIST" 2>/dev/null; then
+			echo "Refusing to remove a domain not learned automatically; use force if intentional." >&2
+			exit 2
+		fi
+		;;
+	*)
+		usage
+		exit 2
+		;;
+esac
+
+for required in "$TOOL" "$MAIN_PROFILE" "$BACKUP_PROFILE" "$BACKUP2_PROFILE" "$LIVE_CONFIG" "$ACTIVE_FILE"; do
+	[ -f "$required" ] || {
+		echo "Missing required file: $required" >&2
+		exit 1
+	}
+done
+
+exec 9>"$LOCK_FILE"
+flock -x 9
+lock_held="1"
+
+active_profile="$(sed -n '1p' "$ACTIVE_FILE")"
+case "$active_profile" in
+	"$MAIN_NAME") active_saved="$MAIN_PROFILE" ;;
+	"$BACKUP_NAME") active_saved="$BACKUP_PROFILE" ;;
+	"$BACKUP2_NAME") active_saved="$BACKUP2_PROFILE" ;;
+	*)
+		echo "Active profile is custom/unknown; refusing automatic route changes." >&2
+		exit 1
+		;;
+esac
+
+if ! cmp -s "$LIVE_CONFIG" "$active_saved"; then
+	echo "Live config differs from the recorded profile; refusing to overwrite custom changes." >&2
+	exit 1
+fi
+
+workdir="$(mktemp -d /tmp/xray-route-domain.XXXXXX)"
+main_stage="${MAIN_PROFILE}.route-new.$$"
+backup_stage="${BACKUP_PROFILE}.route-new.$$"
+backup2_stage="${BACKUP2_PROFILE}.route-new.$$"
+live_stage="${LIVE_CONFIG}.route-new.$$"
+list_stage="${AUTO_LIST}.route-new.$$"
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+cp "$MAIN_PROFILE" "$workdir/original-main.json"
+cp "$BACKUP_PROFILE" "$workdir/original-backup.json"
+cp "$BACKUP2_PROFILE" "$workdir/original-backup2.json"
+cp "$LIVE_CONFIG" "$workdir/original-live.json"
+
+if [ "$command" = "add" ]; then
+	tool_command="add-proxy-domains"
+else
+	tool_command="remove-proxy-domains"
+fi
+
+update_profile "$MAIN_PROFILE" "$workdir/main.json"
+update_profile "$BACKUP_PROFILE" "$workdir/backup.json"
+update_profile "$BACKUP2_PROFILE" "$workdir/backup2.json"
+chmod 600 "$workdir/main.json" "$workdir/backup.json" "$workdir/backup2.json"
+xray run -test -c "$workdir/main.json" >/dev/null
+xray run -test -c "$workdir/backup.json" >/dev/null
+xray run -test -c "$workdir/backup2.json" >/dev/null
+
+case "$active_profile" in
+	"$MAIN_NAME") cp "$workdir/main.json" "$workdir/live.json" ;;
+	"$BACKUP_NAME") cp "$workdir/backup.json" "$workdir/live.json" ;;
+	"$BACKUP2_NAME") cp "$workdir/backup2.json" "$workdir/live.json" ;;
+esac
+chmod 600 "$workdir/live.json"
+
+list_operation=""
+if [ "$command" = "remove" ]; then
+	list_operation="remove"
+elif [ "$source" = "auto" ]; then
+	list_operation="add"
+fi
+[ -z "$list_operation" ] || write_list_candidate \
+	"$list_operation" "$domain" "$workdir/auto-proxy-domains"
+
+configs_changed="1"
+if cmp -s "$MAIN_PROFILE" "$workdir/main.json" && \
+   cmp -s "$BACKUP_PROFILE" "$workdir/backup.json" && \
+   cmp -s "$BACKUP2_PROFILE" "$workdir/backup2.json"; then
+	configs_changed="0"
+fi
+
+if [ "$configs_changed" = "1" ]; then
+	transaction_started="1"
+	install_config "$workdir/main.json" "$main_stage" "$MAIN_PROFILE"
+	install_config "$workdir/backup.json" "$backup_stage" "$BACKUP_PROFILE"
+	install_config "$workdir/backup2.json" "$backup2_stage" "$BACKUP2_PROFILE"
+	install_config "$workdir/live.json" "$live_stage" "$LIVE_CONFIG"
+
+	# Replace the complete ordered routing table; keep existing sessions alive.
+	# No restart fallback: an unavailable API must not disconnect the whole LAN.
+	if ! xray api adrules --server="$ROUTE_API" "$LIVE_CONFIG" \
+		>"$workdir/api-update.log" 2>&1; then
+		echo "Xray route API failed; restoring saved and runtime routing." >&2
+		exit 1
+	fi
+fi
+
+if [ -n "$list_operation" ]; then
+	install_config "$workdir/auto-proxy-domains" "$list_stage" "$AUTO_LIST"
+fi
+transaction_started="0"
+
+logger -t "$TAG" -p daemon.notice \
+	"Domain $domain action=$command source=$source configs_changed=$configs_changed"
+printf '%s\n' "$domain"

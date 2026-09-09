@@ -1,0 +1,198 @@
+#!/bin/sh
+set -u
+
+MAIN_FILE="$(printf '%s\n' /etc/xray/profiles/main-*.json)"
+MAIN_NAME="${MAIN_FILE##*/}"
+MAIN_NAME="${MAIN_NAME%.json}"
+BACKUP_NAME="backup-spacevpn-nl"
+BACKUP2_NAME="backup-spacevpn-de"
+MAIN_PROFILE="/etc/xray/profiles/$MAIN_NAME.json"
+ACTIVE_FILE="/etc/xray/active-profile"
+PROFILE_COMMAND="/usr/bin/xray-profile"
+PROFILE_PROBE="/usr/libexec/xray-profile-probe"
+TAG="xray-profile-watchdog"
+
+config_value() {
+	local option="$1"
+	local fallback="$2"
+	local value
+
+	value="$(uci -q get "xray-profile-watchdog.main.$option" 2>/dev/null || true)"
+	printf '%s\n' "${value:-$fallback}"
+}
+
+positive_integer() {
+	case "$1" in
+		''|*[!0-9]*|0) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+INTERVAL="$(config_value interval 15)"
+FAIL_THRESHOLD="$(config_value fail_threshold 3)"
+RECOVERY_INTERVAL="$(config_value recovery_interval 30)"
+RECOVERY_THRESHOLD="$(config_value recovery_threshold 3)"
+REQUEST_TIMEOUT="$(config_value request_timeout 8)"
+START_GRACE="$(config_value start_grace 10)"
+ACTIVE_SOCKS_PORT="$(config_value active_socks_port 10808)"
+PROBE_SOCKS_PORT="$(config_value probe_socks_port 10818)"
+PROBE_URL="$(config_value probe_url 'https://dns.google/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE')"
+
+for numeric_value in "$INTERVAL" "$FAIL_THRESHOLD" "$RECOVERY_INTERVAL" \
+	"$RECOVERY_THRESHOLD" "$REQUEST_TIMEOUT" "$START_GRACE" \
+	"$ACTIVE_SOCKS_PORT" "$PROBE_SOCKS_PORT"; do
+	if ! positive_integer "$numeric_value"; then
+		logger -t "$TAG" -p daemon.err "Invalid numeric configuration value: $numeric_value"
+		exit 2
+	fi
+done
+
+probe_active() {
+	curl --socks5-hostname "127.0.0.1:$ACTIVE_SOCKS_PORT" \
+		-4 -fsS -o /dev/null \
+		--connect-timeout "$REQUEST_TIMEOUT" \
+		--max-time "$REQUEST_TIMEOUT" \
+		-H 'accept: application/dns-message' \
+		"$PROBE_URL"
+}
+
+probe_profile() {
+	"$PROFILE_PROBE" "$1" "$PROBE_SOCKS_PORT" "$PROBE_URL" "$REQUEST_TIMEOUT"
+}
+
+switch_profile() {
+	local target="$1"
+
+	logger -t "$TAG" -p daemon.notice "Switching to $target"
+	if "$PROFILE_COMMAND" "$target" >/tmp/xray-profile-watchdog-switch.log 2>&1; then
+		logger -t "$TAG" -p daemon.notice "Switch to $target completed"
+		sleep "$START_GRACE"
+		return 0
+	fi
+
+	logger -t "$TAG" -p daemon.err "Switch to $target failed; see /tmp/xray-profile-watchdog-switch.log"
+	return 1
+}
+
+try_backup() {
+	local candidate
+	for candidate in "$BACKUP_NAME" "$BACKUP2_NAME"; do
+		[ "$candidate" != "$active_profile" ] || continue
+		if probe_profile "/etc/xray/profiles/$candidate.json"; then
+			if switch_profile "$candidate"; then
+				return 0
+			fi
+		fi
+	done
+	return 1
+}
+
+main_failures=0
+backup_failures=0
+main_recovery_successes=0
+next_main_probe=0
+last_profile=""
+unknown_reported=""
+
+logger -t "$TAG" -p daemon.notice \
+	"Started: fail=${FAIL_THRESHOLD}, recover=${RECOVERY_THRESHOLD}, interval=${INTERVAL}s"
+
+sleep "$START_GRACE"
+
+while true; do
+	active_profile="$(cat "$ACTIVE_FILE" 2>/dev/null || true)"
+
+	if [ "$active_profile" != "$last_profile" ]; then
+		logger -t "$TAG" -p daemon.notice "Observed active profile: ${active_profile:-unknown}"
+		main_failures=0
+		backup_failures=0
+		main_recovery_successes=0
+		next_main_probe=0
+		last_profile="$active_profile"
+	fi
+
+	case "$active_profile" in
+		"$MAIN_NAME")
+			unknown_reported=""
+			if probe_active; then
+				if [ "$main_failures" -gt 0 ]; then
+					logger -t "$TAG" -p daemon.notice "Main path recovered before failover"
+				fi
+				main_failures=0
+			else
+				main_failures=$((main_failures + 1))
+				logger -t "$TAG" -p daemon.warning \
+					"Main path health check failed (${main_failures}/${FAIL_THRESHOLD})"
+
+				if [ "$main_failures" -ge "$FAIL_THRESHOLD" ]; then
+					if try_backup; then
+						main_failures=0
+					else
+						logger -t "$TAG" -p daemon.err \
+							"Main is unhealthy and neither backup passed end-to-end verification; staying on main"
+					fi
+				fi
+			fi
+			;;
+
+		"$BACKUP_NAME"|"$BACKUP2_NAME")
+			unknown_reported=""
+			if probe_active; then
+				if [ "$backup_failures" -gt 0 ]; then
+					logger -t "$TAG" -p daemon.notice "Backup path recovered"
+				fi
+				backup_failures=0
+			else
+				backup_failures=$((backup_failures + 1))
+				logger -t "$TAG" -p daemon.warning \
+					"Backup path health check failed (${backup_failures}/${FAIL_THRESHOLD})"
+			fi
+
+			now="$(date +%s)"
+			if [ "$now" -ge "$next_main_probe" ] || [ "$backup_failures" -ge "$FAIL_THRESHOLD" ]; then
+				next_main_probe=$((now + RECOVERY_INTERVAL))
+
+				if probe_profile "$MAIN_PROFILE"; then
+					if [ "$backup_failures" -ge "$FAIL_THRESHOLD" ]; then
+						logger -t "$TAG" -p daemon.warning \
+							"Backup is unhealthy and main probe succeeded; returning to main immediately"
+						switch_profile main || true
+						backup_failures=0
+						main_recovery_successes=0
+					else
+						main_recovery_successes=$((main_recovery_successes + 1))
+						logger -t "$TAG" -p daemon.notice \
+							"Main recovery probe succeeded (${main_recovery_successes}/${RECOVERY_THRESHOLD})"
+
+						if [ "$main_recovery_successes" -ge "$RECOVERY_THRESHOLD" ]; then
+							switch_profile main || true
+							main_recovery_successes=0
+						fi
+					fi
+				else
+					if [ "$main_recovery_successes" -gt 0 ]; then
+						logger -t "$TAG" -p daemon.notice "Main recovery streak reset"
+					fi
+					main_recovery_successes=0
+					if [ "$backup_failures" -ge "$FAIL_THRESHOLD" ]; then
+						if try_backup; then
+							backup_failures=0
+						else
+							logger -t "$TAG" -p daemon.err "No healthy alternative profile; keeping current backup"
+						fi
+					fi
+				fi
+			fi
+			;;
+
+		*)
+			if [ "$unknown_reported" != "$active_profile" ]; then
+				logger -t "$TAG" -p daemon.warning \
+					"Active profile is custom/unknown; automatic switching is paused"
+				unknown_reported="$active_profile"
+			fi
+			;;
+	esac
+
+	sleep "$INTERVAL"
+done

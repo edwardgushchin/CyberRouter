@@ -1,0 +1,6 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.gpg.part* -text -diff
+*.bin -text -diff
+*.gz -text -diff

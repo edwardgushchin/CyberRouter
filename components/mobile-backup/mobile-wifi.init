@@ -1,0 +1,8 @@
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+# On-demand only. A phone hotspot is chosen explicitly in the dashboard.
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/ucode /usr/libexec/mobile-backup-wifi.uc worker
+    procd_close_instance
+}

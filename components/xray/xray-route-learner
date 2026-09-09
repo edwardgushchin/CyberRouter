@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+PARSER="/usr/libexec/xray-route-candidates.awk"
+CANDIDATE_COMMAND="/usr/libexec/xray-route-learn-candidate"
+TAG="xray-route-learner"
+
+config_value() {
+	local option="$1"
+	local fallback="$2"
+	local value
+	value="$(uci -q get "xray-route-learner.main.$option" 2>/dev/null || true)"
+	printf '%s\n' "${value:-$fallback}"
+}
+
+ENABLED="$(config_value enabled 1)"
+[ "$ENABLED" = "1" ] || exit 0
+STARTUP_GRACE="$(config_value startup_grace 30)"
+case "$STARTUP_GRACE" in
+	''|*[!0-9]*) exit 2 ;;
+esac
+
+fifo="/tmp/xray-route-learner.$$.fifo"
+log_pid=""
+parser_pid=""
+
+cleanup() {
+	[ -z "$log_pid" ] || kill "$log_pid" 2>/dev/null || true
+	[ -z "$parser_pid" ] || kill "$parser_pid" 2>/dev/null || true
+	[ -z "$log_pid" ] || wait "$log_pid" 2>/dev/null || true
+	[ -z "$parser_pid" ] || wait "$parser_pid" 2>/dev/null || true
+	rm -f "$fifo"
+}
+
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+
+[ -x "$CANDIDATE_COMMAND" ] || exit 1
+[ -f "$PARSER" ] || exit 1
+
+sleep "$STARTUP_GRACE"
+mkfifo -m 600 "$fifo"
+# One historical line cannot form the two-record request sequence tracked by
+# the parser. After that single harmless line, logread follows only new events.
+logread -l 1 -f >"$fifo" &
+log_pid="$!"
+awk -v candidate_command="$CANDIDATE_COMMAND" \
+	-f "$PARSER" <"$fifo" &
+parser_pid="$!"
+
+logger -t "$TAG" -p daemon.notice "Monitoring new direct HTTPS/QUIC requests and resource stalls"
+
+while kill -0 "$log_pid" 2>/dev/null && \
+      kill -0 "$parser_pid" 2>/dev/null; do
+	sleep 5
+done
+
+logger -t "$TAG" -p daemon.err "Log monitor exited unexpectedly"
+exit 1

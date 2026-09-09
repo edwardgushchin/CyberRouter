@@ -1,0 +1,73 @@
+#!/bin/sh
+# Вызывается cron: скачать опубликованную базу доменов и применить через RoutingService.
+set -eu
+umask 077
+
+ASSET_DIR="$(uci -q get xray.config.datadir || printf '%s' /usr/share/xray)"
+STATE="/etc/xray/refilter-last-update"
+TAG="xray-refilter-update"
+workdir=""
+
+cleanup() {
+	result=$?
+	[ -z "$workdir" ] || rm -rf "$workdir"
+	if [ "$result" -ne 0 ]; then
+		logger -t "$TAG" -p daemon.err "Update failed (exit=$result); see xray-route-learner log or run updater manually"
+	fi
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# Отдельный lock не задерживает автообучение во время загрузки из GitHub.
+exec 8>/var/lock/xray-refilter-update.lock
+flock -n 8 || exit 0
+workdir="$(mktemp -d /tmp/xray-refilter-update.XXXXXX)"
+
+download() {
+	curl --fail --silent --show-error --location \
+		--proto '=https' --proto-redir '=https' \
+		--connect-timeout 10 --max-time 120 --retry 2 --retry-delay 5 \
+		--max-filesize 20971520 --output "$2" "$1"
+}
+
+download 'https://api.github.com/repos/1andrevich/Re-filter-lists/releases/latest' "$workdir/release.json"
+ucode - "$workdir/release.json" >"$workdir/asset" <<'UCODE'
+import { readfile } from 'fs';
+let release = json(readfile(ARGV[0]));
+if (release.draft || release.prerelease)
+	die('Expected a stable public release');
+for (let asset in (release.assets || [])) {
+	if (asset.name != 'geosite.dat') continue;
+	if (!match(asset.browser_download_url || '', /^https:\/\/github\.com\/1andrevich\/Re-filter-lists\/releases\/download\/[A-Za-z0-9._-]+\/geosite\.dat$/) ||
+		!match(asset.digest || '', /^sha256:[a-f0-9]{64}$/) ||
+		asset.size < 100000 || asset.size > 20971520)
+		die('Invalid geosite release metadata');
+	printf('%s\n%s\n%d\n', asset.browser_download_url, substr(asset.digest, 7), asset.size);
+	exit(0);
+}
+die('Release has no geosite.dat');
+UCODE
+url="$(sed -n '1p' "$workdir/asset")"
+digest="$(sed -n '2p' "$workdir/asset")"
+expected_size="$(sed -n '3p' "$workdir/asset")"
+asset="refilter-$digest.dat"
+
+if ! printf '%s  %s\n' "$digest" "$ASSET_DIR/$asset" | sha256sum -c - >/dev/null 2>&1; then
+	download "$url" "$workdir/geosite.dat"
+	[ "$(wc -c <"$workdir/geosite.dat" | tr -d ' ')" = "$expected_size" ]
+	printf '%s  %s\n' "$digest" "$workdir/geosite.dat" | sha256sum -c - >/dev/null
+	cp "$workdir/geosite.dat" "$ASSET_DIR/$asset.new"
+	chmod 644 "$ASSET_DIR/$asset.new"
+	mv "$ASSET_DIR/$asset.new" "$ASSET_DIR/$asset"
+fi
+
+# Неизменяемые имена позволяют откатить конфиг на прежнюю базу даже после перезагрузки.
+# ponytail: прежние версии сохраняются (~2 МиБ на выпуск); очистка нужна при нехватке места.
+XRAY_LOCATION_ASSET="$ASSET_DIR" /usr/libexec/xray-route-domain refilter "$asset" >"$workdir/apply.log" 2>&1 || {
+	cat "$workdir/apply.log" >&2
+	exit 1
+}
+printf '%s\n%s\n%s\n' "$(date -Iseconds)" "$url" "$digest" >"$STATE.new"
+mv "$STATE.new" "$STATE"
+logger -t "$TAG" -p daemon.notice "Release checked and active: sha256=$digest"
+printf 'Re:filter active: sha256=%s\n' "$digest"

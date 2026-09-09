@@ -1,0 +1,128 @@
+#!/bin/sh
+# Narrow authenticated rpcd API; never returns configs, tokens or call links.
+. /usr/share/libubox/jshn.sh
+BASE=/etc/mobile-backup
+RUN=/var/run/mobile-backup
+value() { cat "$RUN/$1" 2>/dev/null || printf '%s' "$2"; }
+number() { local n; n=$(value "$1" 0); case "$n" in ''|*[!0-9]*) echo 0;; *) echo "$n";; esac; }
+running() {
+    ubus call service list "{\"name\":\"$1\"}" | jsonfilter -e "@['$1'].instances.*.running" | grep -q true
+}
+controller_running() {
+    ubus call service list '{"name":"mobile-backup"}' | jsonfilter -e '@["mobile-backup"].instances.controller.running' | grep -q true
+}
+reply() { json_init; json_add_boolean ok "$1"; json_add_string message "$2"; json_dump; }
+status() {
+    local auto=0 auth=0 key n provider stamp health group host path expected addresses link count
+    controller_running && auto=1
+    running mobile-vk-auth && auth=1
+    json_init
+    json_add_int now "$(date +%s)"
+    json_add_int checked_at "$(number checked-at)"
+    json_add_boolean running "$auto"
+    json_add_string policy "$(cat "$BASE/policy" 2>/dev/null || echo auto)"
+    for key in mode uplink provider; do json_add_string "$key" "$(value "$key" unknown)"; done
+    json_add_string source "$(cat "$BASE/source" 2>/dev/null || echo wan)"
+    json_add_string link_state "$(value link-state unknown)"
+    json_add_string proxy_state "$(value proxy-state unknown)"
+    json_add_object checks
+    for key in wan_external mobile_external mobile_allowed mobile_state; do
+        n=$(sed -n "s/^$key=//p" "$RUN/checks" 2>/dev/null)
+        json_add_string "$key" "$n"
+    done
+    json_close_object
+    json_add_array providers
+    for provider in $(cat "$BASE/providers"); do
+        case "$provider" in telemost|wbstream|vk) ;; *) continue;; esac
+        stamp=0; health=untested
+        if [ -s "$RUN/$provider.health" ]; then read -r stamp health < "$RUN/$provider.health"; fi
+        json_add_object ''
+        json_add_string id "$provider"; json_add_int checked_at "$stamp"; json_add_string result "$health"
+        json_close_object
+    done
+    json_close_array
+    json_add_object vk
+    json_add_boolean running "$auth"
+    n=0; [ -s "$BASE/vk/vk-auth.json" ] && n=1
+    json_add_boolean authorized "$n"
+    json_add_string state "$(cat "$BASE/vk/auth-state" 2>/dev/null || echo idle)"
+    n=''; [ "$auth" -eq 1 ] && n=$(cat "$BASE/vk/captcha-port" 2>/dev/null)
+    case "$n" in *[!0-9]*) n='';; esac
+    json_add_string challenge "$n"
+    json_close_object
+    json_add_array probes
+    while read -r group host path expected addresses; do
+        json_add_object ''
+        json_add_string host "$host"; json_add_string group "$group"
+        for link in wan wwan; do
+            n=$(value "$link.$host.result" unknown)
+            json_add_string "$link" "$n"
+        done
+        json_close_object
+    done < "$BASE/probes.txt"
+    json_close_array
+    json_add_array events
+    # Only controller-owned event codes; no upstream journal or arbitrary messages.
+    tail -n 14 "$RUN/events" 2>/dev/null | while read -r stamp key; do
+        case "$stamp" in ''|*[!0-9]*) continue;; esac
+        case "$key" in uplink=wan|uplink=wwan|mode=normal|mode=bypass|provider_start=telemost|provider_start=vk|provider_start=wbstream|provider_ready=telemost|provider_ready=vk|provider_ready=wbstream|provider_failed=telemost|provider_failed=vk|provider_failed=wbstream|all_providers_failed|vk_auth_required) printf '%s %s\n' "$stamp" "$key";; esac
+    done > "$RUN/ui-events.$$"
+    while read -r stamp key; do
+        json_add_object ''; json_add_int at "$stamp"; json_add_string event "$key"; json_close_object
+    done < "$RUN/ui-events.$$"
+    rm -f "$RUN/ui-events.$$"
+    json_close_array
+    json_dump | /usr/bin/ucode /usr/libexec/mobile-backup-wifi.uc status
+}
+action() {
+    local input operation selection provider
+    read -r input
+    json_load "$input" || { reply 0 'Некорректный запрос'; return; }
+    json_get_var operation operation; json_get_var selection value
+    exec 8>"$RUN/ui.lock"
+    flock -n 8 || { reply 0 'Другая команда ещё выполняется'; return; }
+    case "$operation" in
+        source)
+            case "$selection" in wan|wwan) ;; *) reply 0 'Неизвестный источник'; return;; esac
+            [ ! -e "$RUN/wifi-pending" ] || { reply 0 'Дождитесь подключения Wi-Fi'; return; }
+            printf '%s\n' "$selection" > "$BASE/source.new" && mv "$BASE/source.new" "$BASE/source"
+            if [ "$selection" = wan ]; then
+                /usr/bin/ucode /usr/libexec/mobile-backup-wifi.uc release wired >/dev/null || { reply 0 'МТС выбран, но Wi-Fi клиент не удалось выключить'; return; }
+            fi
+            ;;
+        policy)
+            case "$selection" in auto|direct|bypass) ;; *) reply 0 'Неизвестный режим'; return;; esac
+            printf '%s\n' "$selection" > "$BASE/policy.new" && mv "$BASE/policy.new" "$BASE/policy"
+            if ! controller_running; then
+                echo 1 > "$BASE/enabled"
+                /etc/init.d/mobile-backup enable
+                /etc/init.d/mobile-backup restart >/dev/null 2>&1
+            fi
+            ;;
+        priority)
+            case "$selection" in telemost|wbstream|vk) ;; *) reply 0 'Неизвестный канал'; return;; esac
+            echo "$selection" > "$BASE/providers.new"
+            for provider in telemost wbstream vk; do [ "$provider" = "$selection" ] || echo "$provider" >> "$BASE/providers.new"; done
+            mv "$BASE/providers.new" "$BASE/providers"
+            ;;
+        reconnect) touch "$RUN/reconnect";;
+        authorize) /usr/sbin/mobile-backup authorize-vk >/dev/null 2>&1 || { reply 0 'Подключите точку доступа телефона'; return; };;
+        cancel-auth)
+            /etc/init.d/mobile-vk-auth stop >/dev/null 2>&1
+            rm -f "$BASE/vk/captcha-port"
+            echo idle > "$BASE/vk/auth-state"
+            ;;
+        *) reply 0 'Неизвестная команда'; return;;
+    esac
+    reply 1 'Команда принята'
+}
+case "$1" in
+    list) echo '{"status":{},"action":{"operation":"","value":""},"scan":{},"wifi":{"operation":"","radio":"","ssid":"","encryption":"","password":""}}';;
+    call) case "$2" in status) status;; action) action;;
+        scan) /usr/bin/ucode /usr/libexec/mobile-backup-wifi.uc scan;;
+        wifi)
+            exec 8>"$RUN/ui.lock"
+            flock -n 8 || { reply 0 'Другая команда ещё выполняется'; exit; }
+            /usr/bin/ucode /usr/libexec/mobile-backup-wifi.uc command;; *) reply 0 'Неизвестный метод';; esac;;
+    *) exit 1;;
+esac

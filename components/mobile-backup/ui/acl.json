@@ -1,0 +1,7 @@
+{
+  "luci-app-mobile-backup": {
+    "description":"Manage mobile internet backup and VK authorization",
+    "read":{"ubus":{"luci.mobile-backup":["status","scan"]}},
+    "write":{"ubus":{"luci.mobile-backup":["action","wifi"]}}
+  }
+}

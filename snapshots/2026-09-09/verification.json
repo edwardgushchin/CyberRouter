@@ -1,0 +1,25 @@
+{
+  "filesystem_reconstruction": "passed",
+  "entries": 3146,
+  "files": 2341,
+  "links": 437,
+  "checked": [
+    "file bytes (SHA-256)",
+    "path set",
+    "symlink targets",
+    "mode",
+    "uid",
+    "gid",
+    "base deletions"
+  ],
+  "physical_factory_restore": "not performed",
+  "native_xray_config_validation": "passed",
+  "native_uci_parse": "passed",
+  "native_shell_syntax": "passed",
+  "live_xray_pids_unchanged": true,
+  "services_started_in_chroot": false,
+  "native_overlay_extraction_and_hashes": "passed",
+  "encrypted_roundtrip": "passed",
+  "source_private_connection_value_matches": 0,
+  "go_rebuild": "not performed; original binary preserved"
+}

@@ -1,0 +1,8 @@
+{
+  "admin/services/mobile-backup": {
+    "title": "Резервный интернет",
+    "order": 59,
+    "action": {"type":"view","path":"mobile-backup/dashboard"},
+    "depends": {"acl":["luci-app-mobile-backup"],"fs":{"/usr/sbin/mobile-backup":"executable"}}
+  }
+}

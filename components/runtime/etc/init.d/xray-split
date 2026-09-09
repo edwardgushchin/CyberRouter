@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+START=98
+STOP=15
+
+add_rule_once() {
+    local cmd="$1"
+    sh -c "$cmd" 2>/dev/null || true
+}
+
+start() {
+    add_rule_once "ip rule add fwmark 0x1 lookup 100"
+    add_rule_once "ip route add local 0.0.0.0/0 dev lo table 100"
+    add_rule_once "ip -6 rule add fwmark 0x1 lookup 100"
+    add_rule_once "ip -6 route add local ::/0 dev lo table 100"
+}
+
+stop() {
+    while ip -6 rule del fwmark 0x1 lookup 100 2>/dev/null; do :; done
+    ip -6 route del local ::/0 dev lo table 100 2>/dev/null || true
+    while ip rule del fwmark 0x1 lookup 100 2>/dev/null; do :; done
+    ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
+}
+
+restart() {
+    stop
+    start
+}

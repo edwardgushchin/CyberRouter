@@ -1,0 +1,6 @@
+{
+  "url": "https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/openwrt-25.12.2-mediatek-filogic-glinet_gl-mt6000-squashfs-sysupgrade.bin",
+  "checksum_source": "https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/sha256sums",
+  "sha256": "80b2ef8cfb799949248830b885cf8bfde0c00d984a85335ee829cd9dd3c988fa",
+  "bytes": 10629440
+}

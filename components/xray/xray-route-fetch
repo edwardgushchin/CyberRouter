@@ -1,0 +1,31 @@
+#!/bin/sh
+# 0: complete 2xx sample; 1: transport failure; 2: inconclusive (never learn).
+set -eu
+url="${1:?URL required}"
+request_timeout="${2:?timeout required}"
+output="${3:-/dev/null}"
+port="${4:-direct}"
+case "$url" in https://*) ;; *) exit 2 ;; esac
+case "$request_timeout" in ''|*[!0-9]*|0) exit 2 ;; esac
+if [ "$port" = direct ]; then
+	set -- --noproxy '*'
+else
+	case "$port" in ''|*[!0-9]*) exit 2 ;; esac
+	[ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || exit 2
+	set -- --noproxy '' --socks5-hostname "127.0.0.1:$port"
+fi
+
+# ponytail: inspect the first 64 KiB, not entire applications; raise the sample
+# only if a measured failure starts later. Servers ignoring Range are capped.
+status=0
+metadata="$(curl -q "$@" -4 -sS --globoff --proto '=https' \
+	--connect-timeout "$request_timeout" --max-time "$request_timeout" \
+	--range 0-65535 --max-filesize 1048576 \
+	-o "$output" -w '%{http_code} %{content_type}' "$url" 2>/dev/null)" || status=$?
+printf '%s\n' "$metadata"
+case "$metadata" in 000\ *|2[0-9][0-9]\ *) ;; *) exit 2 ;; esac
+case "$status" in
+	0) case "$metadata" in 2[0-9][0-9]\ *) exit 0 ;; *) exit 2 ;; esac ;;
+	5|6|7|16|18|28|35|52|55|56|92) exit 1 ;;
+	*) exit 2 ;;
+esac
