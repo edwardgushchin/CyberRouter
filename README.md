@@ -2,6 +2,7 @@
 <h3 align="center">Домашняя сеть, которую можно восстановить</h3>
 <p align="center">Полный снимок Flint 2, исходники доработок и проверяемое развёртывание на чистом OpenWrt.</p>
 <p align="center">
+<a href="https://github.com/edwardgushchin/CyberRouter/actions/workflows/checks.yml"><img alt="Checks" src="https://github.com/edwardgushchin/CyberRouter/actions/workflows/checks.yml/badge.svg"></a>
 <img alt="OpenWrt 25.12.2" src="https://img.shields.io/badge/OpenWrt-25.12.2-00a3dc">
 <img alt="Flint 2 GL-MT6000" src="https://img.shields.io/badge/Router-Flint_2-54cbb6">
 <img alt="Encrypted AES-256" src="https://img.shields.io/badge/Snapshot-AES--256-6d83e8">
@@ -11,9 +12,9 @@
 
 ## О проекте
 
-CyberRouter сохраняет фактическое состояние домашнего роутера на **9 сентября 2026 года**. Это локальный Git-репозиторий с полным зашифрованным состоянием, официальной прошивкой и читаемым кодом наших доработок. Для восстановления на таком же устройстве не нужны старые чаты, действующий старый роутер или доступ к будущим зеркалам пакетов.
+CyberRouter сохраняет фактическое состояние домашнего роутера на **9 сентября 2026 года**. Это Git-репозиторий с полным зашифрованным состоянием, официальной прошивкой и читаемым кодом наших доработок. Для восстановления на таком же устройстве не нужны старые чаты, действующий старый роутер или доступ к будущим зеркалам пакетов.
 
-Оформление README и структура документации вдохновлены [SDL3-CS](https://github.com/edwardgushchin/SDL3-CS). Логотип и содержание собственные. Развёртывание GitHub Actions подготовлено; публичный репозиторий и удалённый CI ещё не создавались.
+Оформление README и структура документации вдохновлены [SDL3-CS](https://github.com/edwardgushchin/SDL3-CS). Логотип и содержание собственные. Публичный репозиторий: [edwardgushchin/CyberRouter](https://github.com/edwardgushchin/CyberRouter). Автономные проверки выполняет [GitHub Actions](https://github.com/edwardgushchin/CyberRouter/actions/workflows/checks.yml).
 
 ## Что внутри
 
@@ -79,4 +80,4 @@ git diff --check
 
 Для аварии роутера комплект уже находится на компьютере. Для аварии компьютера нужна **ещё одна копия репозитория и отдельная копия ключа на другом носителе**. Две папки на одном диске не дают такой защиты. Утрата ключа делает зашифрованный снимок недоступным.
 
-Инструменты проекта — [zlib](LICENSE); сторонние компоненты сохраняют свои лицензии, см. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Приватный снимок не предназначен для публичного распространения.
+Инструменты проекта — [zlib](LICENSE); сторонние компоненты сохраняют свои лицензии, см. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Снимок опубликован в зашифрованном виде; его ключ и расшифрованное содержимое остаются приватными.
