@@ -19,7 +19,7 @@ function flatten(node) {
 (async () => {
   const calls = [], confirmations = [];
   let accepted = true, selected = 'main-test';
-  const status = () => `Recorded active profile: ${selected}\nDetected live profile: ${selected}\nxray runtime=active autostart=yes\n`;
+  const status = () => `Recorded active profile: ${selected}\nDetected live profile: ${selected}\nxray runtime=active autostart=yes\nTLS guard: active\nTLS health: 1700000000 example.com trial split 0\nTLS health: 1700000001 asset.example fallback vpn 0\nTLS health: 1700000002 <script> suspect zapret 1\n`;
   const ui = {
     addNotification() {},
     createHandlerFn: (self, method, ...args) => event => self[method](...args, event)
@@ -33,13 +33,20 @@ function flatten(node) {
     return { code: 0, stdout: status() };
   } };
   const source = fs.readFileSync(path.join(__dirname, 'luci-profile.js'), 'utf8');
-  const view = new Function('view', 'fs', 'ui', 'L', 'E', 'document', 'navigator', 'confirm', source)(
+  const polls = [];
+  const view = new Function('view', 'fs', 'ui', 'L', 'E', 'document', 'navigator', 'confirm', 'poll', source)(
     { extend: value => value }, rpc, ui, { env: { lang: 'ru' }, bind: (fn, self) => fn.bind(self) },
     E, { documentElement: { lang: 'ru' } }, { language: 'ru' },
-    text => { confirmations.push(text); return accepted; }
+    text => { confirmations.push(text); return accepted; }, { add: (fn, interval) => polls.push({fn, interval}) }
   );
   const nodes = flatten(view.render({ stdout: status() }));
   const buttons = nodes.filter(node => node.tag === 'button');
+  assert.equal(view.healthNode.attrs['aria-live'], 'polite');
+  assert.equal(view.healthNode.children.length, 3, 'invalid domain rejected');
+  assert.ok(JSON.stringify(view.healthNode).includes('проверяется альтернатива'));
+  assert.ok(JSON.stringify(view.healthNode).includes('Ресурс целиком загрузился через VPN'));
+  assert.equal(polls[0].interval, 15);
+  await polls[0].fn();
   assert.deepEqual(buttons.map(node => node.children.join('')), [
     'Основной VDS', 'Резерв: Нидерланды', 'Резерв: Германия', 'Отключить Xray', 'Обновить'
   ]);

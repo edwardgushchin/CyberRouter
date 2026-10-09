@@ -1,5 +1,6 @@
 /private/
 /.temp/
+/.dev-diary/
 __pycache__/
 *.pyc
 .DS_Store

@@ -139,6 +139,28 @@ show_status() {
         learned_count="$(sed '/^[[:space:]]*$/d' "$AUTO_LIST" | wc -l | tr -d ' ')"
         echo "Auto-learned domains: ${learned_count:-0}"
     fi
+    guard_pid="$(cat /tmp/zapret-health/pid 2>/dev/null || true)"
+    case "$guard_pid" in ''|*[!0-9]*) guard_pid=0 ;; esac
+    if [ "$guard_pid" -gt 1 ] && [ "$(cat /proc/$guard_pid/comm 2>/dev/null)" = nfqws2 ]; then
+        echo 'TLS guard: active'
+    else
+        echo 'TLS guard: waiting'
+    fi
+    if [ -r /tmp/zapret-health/health ]; then
+        # Only the bounded, validated metadata format enters LuCI, never packet logs.
+        learned_source="$AUTO_LIST"
+        [ -r "$learned_source" ] || learned_source=/dev/null
+        awk -v learned_file="$learned_source" '
+             BEGIN { while ((getline domain < learned_file) > 0) learned[domain] = 1; close(learned_file) }
+             NF == 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/ &&
+             $3 ~ /^(observing|confirmed|suspect|trial|unresolved|retry)$/ &&
+             $4 ~ /^(zapret|split|direct)$/ && $5 ~ /^[0-9]+$/ {
+                 state = learned[$2] ? "fallback" : $3
+                 mode = learned[$2] ? "vpn" : $4
+                 priority = (state == "unresolved" ? 3 : (state == "trial" || state == "suspect" ? 2 : (state == "fallback" ? 1 : 0)))
+                 printf "%.0f %s %s %s %s %s\n", priority * 10000000000 + $1, $1, $2, state, mode, $5
+             }' /tmp/zapret-health/health | sort -nr | head -32 | cut -d ' ' -f2- | sed 's/^/TLS health: /'
+    fi
 }
 
 restart_if_enabled() {

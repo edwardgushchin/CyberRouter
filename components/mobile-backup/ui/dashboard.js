@@ -49,7 +49,7 @@ return view.extend({
     },
     scanNetworks:function(){
         var self=this; self.scanning=true; self.paint(self.data);
-        text('mb-wifi-feedback','Ищем сети 2,4 и 5 ГГц…');
+        text('mb-wifi-feedback','Ищем доступные Wi-Fi сети…');
         return scanWifi().then(function(r){
             if(!r.ok)throw new Error('Радиомодуль не ответил. Повторите поиск.');
             var list=element('mb-networks'); list.replaceChildren();

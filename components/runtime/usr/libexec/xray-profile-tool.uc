@@ -35,6 +35,10 @@ function proxy_domain_rule(document) {
 	for (let rule in document.routing.rules) {
 		if (rule.outboundTag != 'proxy' || type(rule.domain) != 'array')
 			continue;
+		if (rule.ruleTag == 'common-proxy-domains')
+			return rule;
+		if (rule.ruleTag)
+			continue;
 
 		if (length(rule.domain) > best_length) {
 			best = rule;
@@ -46,6 +50,41 @@ function proxy_domain_rule(document) {
 		fail('proxy domain rule is missing');
 
 	return best;
+}
+
+function set_proxy_domains(input_path, output_path, request_path) {
+	let document = load_json(input_path);
+	let rule = proxy_domain_rule(document);
+	let request = load_json(request_path);
+	if (type(request.domains) != 'array' || !length(request.domains) ||
+		type(request.previous) != 'array')
+		fail('expected a nonempty domains array and a previous array');
+	if (sprintf('%J', sort([...rule.domain])) != sprintf('%J', sort([...request.previous])))
+		fail('domain list changed; refresh the page before saving');
+	let seen = {};
+	let domains = [];
+	for (let token in request.domains) {
+		// Preserve existing legacy selectors; validate every newly added hostname.
+		if (index(rule.domain, token) < 0) {
+			if (type(token) != 'string' || !match(token, /^domain:/))
+				fail('expected domain:hostname');
+			let domain = substr(token, 7);
+			if (length(domain) > 253 || !match(domain, /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/) ||
+				!match(domain, /\./) || !match(domain, /[a-z]/) ||
+				match(domain, /(^|\.)(localhost|lan|local|home\.arpa)$/))
+				fail('invalid or local hostname');
+			for (let label in split(domain, '.'))
+				if (length(label) > 63 || !match(label, /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/))
+					fail('invalid hostname label');
+		}
+		if (!seen[token]) {
+			push(domains, token);
+			seen[token] = true;
+		}
+	}
+	rule.ruleTag = 'common-proxy-domains';
+	rule.domain = domains;
+	save_json(output_path, document);
 }
 
 function merge_common_domains(source_path, target_path, output_path) {
@@ -160,6 +199,12 @@ function make_probe(profile_path, output_path, port_value) {
 let command = shift(ARGV);
 
 switch (command) {
+case 'set-proxy-domains':
+	if (length(ARGV) != 3)
+		fail('usage: set-proxy-domains INPUT OUTPUT REQUEST');
+	set_proxy_domains(ARGV[0], ARGV[1], ARGV[2]);
+	break;
+
 case 'merge-common-domains':
 	if (length(ARGV) != 3)
 		fail('usage: merge-common-domains SOURCE TARGET OUTPUT');

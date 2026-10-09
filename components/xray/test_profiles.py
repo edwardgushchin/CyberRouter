@@ -91,6 +91,19 @@ sys.exit(0 if states[min(tick, len(states)-1)] else 1)
         assert live.read_bytes() == before and active.read_text().strip() == MAIN
         (root / 'restart-fails').unlink()
         assert run('xray-profile', '../invalid').returncode != 0
+        health = root / 'tmp/zapret-health/health'
+        health.parent.mkdir()
+        (root / 'etc/xray/auto-proxy-domains').write_text('healthy.example\n')
+        health.write_text('1700000002 healthy.example confirmed split 0\n'
+                          '1700000001 broken.example unresolved zapret 0\n'
+                          '1700000003 warn.example suspect zapret 1\n'
+                          '1700000004 <script> suspect zapret 1\n')
+        observations = [line for line in run('xray-profile', 'status').stdout.splitlines()
+                        if line.startswith('TLS health:')]
+        assert [line.split()[3] for line in observations] == [
+            'broken.example', 'warn.example', 'healthy.example']
+        assert observations[2].endswith('healthy.example fallback vpn 0')
+        health.unlink()
         print('PASS CLI: both backup aliases, readback, failed-restart rollback, invalid profile')
 
         cases = [

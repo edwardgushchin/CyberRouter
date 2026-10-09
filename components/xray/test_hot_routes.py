@@ -18,6 +18,15 @@ import time
 HERE = Path(__file__).resolve().parent
 SSH = ['ssh', '-F', str(Path.home() / '.ssh/config'), '-o', 'BatchMode=yes']
 DOMAIN = 'route-hot-test.example'
+YOUTUBE_DIRECT = ('www.youtube.com', 'r1---test.googlevideo.com', 'i.ytimg.com',
+                  'youtubei.googleapis.com', 'youtube.googleapis.com', 'youtu.be',
+                  'www.youtube-nocookie.com', 'www.youtubekids.com')
+YOUTUBE_AVATARS = ('yt3.ggpht.com', 'yt4.ggpht.com',
+                   'yt3.googleusercontent.com', 'yt4.googleusercontent.com')
+DISCORD_DIRECT = ('discord.com', 'gateway.discord.gg', 'cdn.discordapp.com',
+                  'media.discordapp.net', 'voice.discord.media')
+ERESIDENCY_DIRECT = ('eresidency.kz', 'api.eresidency.kz',
+                     'term-test.eresidency.kz')
 
 
 def geosite(domain):
@@ -84,7 +93,7 @@ def check_refilter(root, files, call, source, stream, port):
     assert remote(f'cat {root}/etc/xray/auto-proxy-domains').stdout.strip() == DOMAIN
     remote(f'{call} remove {DOMAIN}')
     remote(f'{call} refilter {names[1]}')
-    put(root + '/no-api-helper', source.replace('127.0.0.1:10086', '127.0.0.1:10089'))
+    put(root + '/no-api-helper', source.replace('127.0.0.1:10086', '127.0.0.1:10089').replace('--timeout=30', '--timeout=1'))
     before = remote('sha256sum ' + ' '.join(files)).stdout
     assert remote(f'XRAY_LOCATION_ASSET={assets} sh {root}/no-api-helper refilter {names[0]}', ok=False).returncode != 0
     assert remote('sha256sum ' + ' '.join(files)).stdout == before
@@ -157,7 +166,7 @@ esac
 
 def remote(command, data=None, ok=True):
     result = subprocess.run(SSH + ['flint2', command], input=data, text=True,
-                            capture_output=True, timeout=20)
+                            capture_output=True, timeout=75)
     if ok:
         assert result.returncode == 0, (command, result.stderr)
     return result
@@ -205,12 +214,12 @@ class Pipe:
         self.close()
 
 
-def socks(port):
+def socks(port, domain=DOMAIN):
     sock = Pipe()
     try:
         sock.sendall(b'\x05\x01\x00')
         assert receive(sock, 2) == b'\x05\x00'
-        host = DOMAIN.encode()
+        host = domain.encode()
         sock.sendall(b'\x05\x01\x00\x03' + bytes([len(host)]) + host + port.to_bytes(2, 'big'))
         head = receive(sock, 4)
         assert head[:2] == b'\x05\x00', head
@@ -235,6 +244,113 @@ class Echo(socketserver.BaseRequestHandler):
             pass
 
 
+def check_youtube(root, files, call, source, stream, port):
+    def blocked(domain):
+        try:
+            with socks(port, domain) as fresh:
+                echo(fresh)
+        except (OSError, AssertionError):
+            return
+        raise AssertionError(f'{domain} bypassed the proxy route')
+
+    blob = geosite('youtube.com')
+    name = 'refilter-' + hashlib.sha256(blob).hexdigest() + '.dat'
+    put_binary(f'{root}/assets/{name}', blob)
+    remote(f'{call} refilter {name}')
+    remote(f'{call} add googlevideo.com auto')
+    blocked('www.youtube.com')
+    blocked('r1---test.googlevideo.com')
+    before = remote('sha256sum ' + ' '.join(files)).stdout
+    put(root + '/no-api-helper', source.replace('127.0.0.1:10086', '127.0.0.1:10089').replace('--timeout=30', '--timeout=1'))
+    assert remote(f'XRAY_LOCATION_ASSET={root}/assets sh {root}/no-api-helper youtube-direct', ok=False).returncode != 0
+    assert remote('sha256sum ' + ' '.join(files)).stdout == before
+    remote(f'{call} youtube-direct')
+    # Future learner additions and list refreshes must not override this policy.
+    remote(f'{call} add youtube.com auto')
+    remote(f'{call} refilter {name}')
+    for domain in YOUTUBE_DIRECT:
+        try:
+            with socks(port, domain) as fresh:
+                echo(fresh)
+        except (OSError, AssertionError) as error:
+            raise AssertionError(f"YouTube direct route failed: {domain}") from error
+    for domain in YOUTUBE_AVATARS + ('already-blocked.example',):
+        blocked(domain)
+    for file in files:
+        config = json.loads(remote('cat ' + file).stdout)
+        assert [r.get('ruleTag') for r in config['routing']['rules'][:2]] == [
+            'youtube-avatars-proxy', 'youtube-direct']
+    before = remote('sha256sum ' + ' '.join(files)).stdout
+    remote(f'{call} youtube-direct')
+    assert remote('sha256sum ' + ' '.join(files)).stdout == before
+    remote(f'{call} remove youtube.com')
+    remote(f'{call} remove googlevideo.com')
+    for i in range(30):
+        echo(stream, f'youtube-update-{i}'.encode())
+    print('PASS YouTube: CDN/API/thumbnails direct, four avatar hosts proxy, learner/refilter precedence, no-op, rollback, 30 old-stream exchanges')
+
+
+def check_set_domains(root, files, call, source, stream, port):
+    def common(file):
+        rules = json.loads(remote('cat ' + file).stdout)['routing']['rules']
+        tagged = [r for r in rules if r.get('ruleTag') == 'common-proxy-domains']
+        return tagged[0] if tagged else max(
+            (r for r in rules if not r.get('ruleTag') and r.get('outboundTag') == 'proxy' and 'domain' in r),
+            key=lambda r: len(r['domain']))
+
+    original = [json.loads(remote('cat ' + file).stdout) for file in files]
+    previous = common(files[0])['domain']
+    requested = previous + ['domain:' + DOMAIN]
+    request_file = root + '/domains-request.json'
+    put(request_file, json.dumps({'previous': previous, 'domains': requested}))
+    remote(f'{call} set-domains {request_file}')
+    for file, before in zip(files, original):
+        changed = json.loads(remote('cat ' + file).stdout)
+        rule = common(file)
+        assert rule['domain'] == requested
+        for candidate in changed['routing']['rules']:
+            if candidate.get('ruleTag') == 'common-proxy-domains':
+                candidate.pop('ruleTag')
+                candidate['domain'] = previous
+        assert changed == before, 'special rules or unrelated settings changed'
+    try:
+        with socks(port) as fresh:
+            echo(fresh)
+    except (OSError, AssertionError):
+        pass
+    else:
+        raise AssertionError('set-domains did not apply live routes')
+    for i in range(30):
+        echo(stream, f'list-save-{i}'.encode())
+
+    before = remote('sha256sum ' + ' '.join(files)).stdout
+    assert remote(f'{call} set-domains {request_file}', ok=False).returncode != 0, 'stale page accepted'
+    assert remote('sha256sum ' + ' '.join(files)).stdout == before
+    for bad in ('domain:bad.local', 'domain:a..example', 'domain:-a.example', 'domain:127.0.0.1', 'ext:bad:refilter'):
+        put(request_file, json.dumps({'previous': requested, 'domains': [bad]}))
+        assert remote(f'{call} set-domains {request_file}', ok=False).returncode != 0
+        assert remote('sha256sum ' + ' '.join(files)).stdout == before
+
+    put(request_file, json.dumps({'previous': requested, 'domains': previous}))
+    put(root + '/no-api-helper', source.replace('127.0.0.1:10086', '127.0.0.1:10089').replace('--timeout=30', '--timeout=1'))
+    assert remote(f'XRAY_LOCATION_ASSET={root}/assets sh {root}/no-api-helper set-domains {request_file}', ok=False).returncode != 0
+    assert remote('sha256sum ' + ' '.join(files)).stdout == before
+    for active in ('backup-spacevpn-nl', 'backup-spacevpn-de', 'main-test'):
+        put(root + '/etc/xray/active-profile', active + '\n')
+        remote(f'{call} set-domains {request_file}')
+        with socks(port) as fresh:
+            echo(fresh)
+        for file in files:
+            assert common(file)['domain'] == previous
+        put(request_file, json.dumps({'previous': previous, 'domains': previous}))
+    remote(f'{call} add {DOMAIN} auto')
+    for file in files:
+        assert 'domain:' + DOMAIN in common(file)['domain'], 'learner lost short tagged list'
+    remote(f'{call} remove {DOMAIN}')
+    echo(stream)
+    print('PASS domain list: all profiles, special rules preserved, stale/invalid input rejected, API rollback, reserves retain list, learner, 30 old-stream exchanges')
+
+
 if __name__ == '__main__':
     root = remote('mktemp -d /tmp/xray-hot-test.XXXXXX').stdout.strip()
     assert re.fullmatch(r'/tmp/xray-hot-test\.[a-zA-Z0-9]+', root)
@@ -252,13 +368,15 @@ if __name__ == '__main__':
         config = {
             'log': {'loglevel': 'warning'},
             'api': {'tag': 'route-api', 'listen': '127.0.0.1:10086', 'services': ['RoutingService']},
-            'dns': {'hosts': {DOMAIN: local_ip}},
+            'dns': {'hosts': {name: local_ip for name in
+                    (DOMAIN, 'already-blocked.example') + YOUTUBE_DIRECT + YOUTUBE_AVATARS +
+                    DISCORD_DIRECT + ERESIDENCY_DIRECT}},
             'inbounds': [{'listen': '127.0.0.1', 'port': 10828, 'protocol': 'socks',
                           'tag': 'test-in', 'settings': {'auth': 'noauth'}}],
             'outbounds': [{'tag': 'direct', 'protocol': 'freedom', 'settings': {'domainStrategy': 'UseIP'}},
                           {'tag': 'proxy', 'protocol': 'blackhole'}],
             'routing': {'domainStrategy': 'AsIs', 'rules': [
-                {'type': 'field', 'domain': ['domain:already-blocked.example'], 'outboundTag': 'proxy'},
+                {'type': 'field', 'domain': ['domain:already-blocked.example', 'domain:geosite:LEGACY', 'domain:192.0.2.10'], 'outboundTag': 'proxy'},
                 {'type': 'field', 'inboundTag': ['test-in'], 'outboundTag': 'direct'}]}}
         files = [f'{root}/etc/xray/{name}' for name in (
             'config.json', 'profiles/main-test.json', 'profiles/backup-spacevpn-nl.json',
@@ -270,6 +388,9 @@ if __name__ == '__main__':
         source = re.sub(r'/(?:etc/xray|var/lock|tmp)/', lambda m: root + m[0], source)
         source = source.replace('127.0.0.1:10085', '127.0.0.1:10086')
         source = source.replace('TAG="xray-route-learner"', 'TAG="xray-hot-test"')
+        source = source.replace('/usr/libexec/xray-profile-tool.uc', root + '/profile-tool.uc')
+        put(root + '/profile-tool.uc', (HERE.parent / 'runtime/usr/libexec/xray-profile-tool.uc').read_text())
+        remote(f'chmod +x {root}/profile-tool.uc')
         put(root + '/helper', source)
         remote(f'xray run -test -c {files[0]} >/dev/null')
         pid = remote(f'xray run -c {files[0]} >{root}/xray.log 2>&1 </dev/null & echo $!').stdout.strip()
@@ -319,10 +440,54 @@ if __name__ == '__main__':
         print('PASS route synchronization with either backup active')
 
         check_refilter(root, files, call, source, stream, port)
+        check_youtube(root, files, call, source, stream, port)
+        remote(f'{call} add api.eresidency.kz auto')
+        remote(f'{call} eresidency-direct')
+        for domain in ERESIDENCY_DIRECT:
+            with socks(port, domain) as fresh:
+                echo(fresh)
+        for file in files:
+            saved = json.loads(remote('cat ' + file).stdout)
+            assert saved['routing']['rules'][0] == {
+                'type': 'field', 'ruleTag': 'eresidency-direct',
+                'outboundTag': 'direct', 'domain': ['domain:eresidency.kz']}
+        before = remote('sha256sum ' + ' '.join(files)).stdout
+        remote(f'{call} eresidency-direct')
+        assert remote('sha256sum ' + ' '.join(files)).stdout == before
+        remote(f'{call} eresidency-auto')
+        for file in files:
+            saved = json.loads(remote('cat ' + file).stdout)
+            assert all(rule.get('ruleTag') != 'eresidency-direct' for rule in saved['routing']['rules'])
+        remote(f'{call} remove api.eresidency.kz')
+        print('PASS eResidency: subdomains direct, learned-route precedence, no-op, reversible')
+
+        remote(f'{call} add discord.com auto')
+        remote(f'{call} discord-direct')
+        for domain in DISCORD_DIRECT:
+            with socks(port, domain) as fresh:
+                echo(fresh)
+        for file in files:
+            saved = json.loads(remote('cat ' + file).stdout)
+            assert saved['routing']['rules'][0]['ruleTag'] == 'discord-direct'
+        before = remote('sha256sum ' + ' '.join(files)).stdout
+        remote(f'{call} discord-direct')
+        assert remote('sha256sum ' + ' '.join(files)).stdout == before
+        remote(f'{call} discord-auto')
+        for file in files:
+            saved = json.loads(remote('cat ' + file).stdout)
+            assert all(rule.get('ruleTag') != 'discord-direct' for rule in saved['routing']['rules'])
+        before = remote('sha256sum ' + ' '.join(files)).stdout
+        remote(f'{call} discord-auto')
+        assert remote('sha256sum ' + ' '.join(files)).stdout == before
+        remote(f'{call} remove discord.com')
+        echo(stream)
+        print('PASS Discord: optional direct rule and automatic fallback restore, all profiles, idempotent, old stream alive')
+
+        check_set_domains(root, files, call, source, stream, port)
 
         # Unavailable API: restore all saved files, never restart Xray or learn a rule.
         before = remote('sha256sum ' + ' '.join(files)).stdout
-        put(root + '/no-api-helper', source.replace('127.0.0.1:10086', '127.0.0.1:10089'))
+        put(root + '/no-api-helper', source.replace('127.0.0.1:10086', '127.0.0.1:10089').replace('--timeout=30', '--timeout=1'))
         failed = remote(f'XRAY_LOCATION_ASSET={root}/assets sh {root}/no-api-helper add {DOMAIN} auto', ok=False)
         assert failed.returncode != 0
         assert remote('sha256sum ' + ' '.join(files)).stdout == before

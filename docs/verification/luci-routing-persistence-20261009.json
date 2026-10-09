@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-09",
+  "timezone": "Europe/Moscow",
+  "applied_at": "2026-10-09T18:22:42+03:00",
+  "router_backup": "/etc/xray/backups/luci-domains-20261009.LMEKLC",
+  "root_cause": [
+    "LuCI selected first proxy domain rule: YouTube avatars",
+    "LuCI saved only live config, which profile switching replaced"
+  ],
+  "persistent_configs": 4,
+  "saved_profiles": 3,
+  "common_domains": 363,
+  "avatar_domains": 4,
+  "live_matches_active_saved_profile": true,
+  "unrelated_profile_settings_preserved": true,
+  "legacy_selectors_preserved": 4,
+  "xray_pids_before": [
+    9142,
+    3272
+  ],
+  "xray_pids_after": [
+    9142,
+    3272
+  ],
+  "deployed_sha256": {
+    "/usr/libexec/xray-profile-tool.uc": "cc5268d5030c2ea3e311de205f7f73980358814fbf806183d228f13895e60c6c",
+    "/usr/libexec/xray-route-domain": "89cc3a10b670816a9264d931caa39b2d142b87bbecb33603e491449d474012c7",
+    "/www/luci-static/resources/view/xray/status.js": "6fb68cef1a92eb796f48a180347c15b1ca0b087f9fee1f33c5196a7cfffd8050"
+  },
+  "checks": {
+    "old_luci_regression": "RED: selected avatars instead of common domains",
+    "luci_routing_test": "PASS",
+    "isolated_hot_routes": "PASS, including stale/invalid input, all profiles, API rollback, and 30 existing-stream exchanges",
+    "project_tests": "PASS",
+    "installed_helper_save_noop": "PASS: four configuration hashes unchanged",
+    "native_xray_config_tests": "4 Configuration OK",
+    "repository_secret_and_snapshot_check": "PASS",
+    "lan_flightradar": {
+      "http": 403,
+      "seconds": 1.930724,
+      "route": "common-proxy-domains -> proxy, confirmed TCP and UDP in router logs"
+    },
+    "router_socks_flightradar": {
+      "http": 403,
+      "seconds": 0.670078
+    },
+    "lan_google": {
+      "http": 200,
+      "seconds": 0.319178
+    },
+    "lan_ozon": {
+      "http": 307,
+      "seconds": 0.151862
+    },
+    "lan_example_com": {
+      "result": "connect timeout",
+      "seconds": 5.004314,
+      "relation_to_change": "not established"
+    }
+  },
+  "limits": [
+    "No production profile switch or router reboot performed",
+    "No Chrome UI save tested: only in-app browser was available without existing tabs",
+    "HTTP 403 does not verify browser rendering or CAPTCHA",
+    "September encrypted snapshots predate this fix"
+  ],
+  "user_next_step": "Reload LuCI without cache (Ctrl+Shift+R) before saving again"
+}

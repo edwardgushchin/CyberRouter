@@ -1,0 +1,37 @@
+{
+  "scope": "Authenticated encryption roundtrip, targeted YouTube configuration checks and full filesystem reconstruction; physical restore not performed",
+  "encrypted_sha256": "0b23025f7ee97e75f4fe7157e700ba7683c580b371a9001a1a532860277830dd",
+  "profiles_checked": 4,
+  "unrelated_profile_fields_unchanged": true,
+  "live_matches_active_saved_profile": true,
+  "avatar_proxy_domains": 4,
+  "youtube_direct_domains": 12,
+  "captured_helpers_match_repository": true,
+  "real_credential_values_checked": 8,
+  "public_credential_matches": 0,
+  "previous_snapshot_retained": true,
+  "hot_route_integration": "passed, including learner/refilter precedence and existing stream preservation",
+  "live_tv_receive_mbps_before": 0.475,
+  "live_tv_receive_mbps_after": 16.86,
+  "fresh_tv_video_connections_checked": 4,
+  "fresh_tv_video_udp443_rejections": 0,
+  "visual_tv_acceptance": "deferred by user",
+  "filesystem_reconstruction": {
+    "status": "passed",
+    "entries": 3155,
+    "files": 2348,
+    "links": 437,
+    "overlay_entries": 1957,
+    "deletions": 22,
+    "checked": [
+      "file bytes (SHA-256)",
+      "path set",
+      "symlink targets",
+      "mode",
+      "uid",
+      "gid",
+      "base deletions"
+    ],
+    "physical_factory_restore": "not performed"
+  }
+}

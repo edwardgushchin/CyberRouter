@@ -12,16 +12,23 @@ source = source.replace("const BASE='/etc/mobile-backup', RUN='/var/run/mobile-b
 source = source[:source.index('\ntry {\n    let action=ARGV[0]')]
 mock = '''
 let original={'.name':'wifinet2',mode:'sta',network:'wwan',device:'radio0',ssid:'old network',encryption:'psk2',key:'old-test-password'};
-let configuration=json(sprintf('%J',original)), reloads=0, shouldJoin=false, commands=[];
+let configuration=json(sprintf('%J',original)), reloads=0, shouldJoin=false, commands=[], scans=[];
 const uci={
-    get:(cfg, section)=>index(['radio0','radio1'],section)>=0?'wifi-device':null,
-    foreach:(cfg, kind, fn)=>{if(configuration)fn(configuration);},
+    get:(cfg, section)=>index(['radio0','radio1','radio2'],section)>=0?'wifi-device':null,
+    foreach:(cfg, kind, fn)=>{
+        if(kind=='wifi-device'){for(let r in ['radio0','radio1','radio2'])fn({'.name':r});}
+        else if(configuration)fn(configuration);
+    },
     delete:(cfg,name)=>{configuration=null;},
     set:(cfg,name,key,value)=>{if(value==null)configuration={'.name':name};else configuration[key]=value;return true;},
     commit:()=>true
 };
-const bus={call:(object,method)=>{
+const bus={call:(object,method,args)=>{
     if(object=='network.interface.wwan' && method=='status')return {up:shouldJoin,l3_device:'wlan-test','ipv4-address':[{address:'192.0.2.2'}]};
+    if(object=='iwinfo' && method=='scan'){
+        push(scans,args.device);
+        return {results:[{ssid:'new network',mode:'Master',encryption:{enabled:false},signal:-40,band:2,channel:1}]};
+    }
     if(object=='iwinfo')return {ssid:'new network'};
     return {};
 }};
@@ -60,7 +67,23 @@ commands=[];save(RUN+'/wifi-pending',sprintf('%J',pending));worker();
 assert(job().state=='connected' && configuration.device=='radio1');
 assert(length(filter(commands,c=>index(c,'wifi reload radio0')>=0))==0);
 assert(length(filter(commands,c=>index(c,'wifi reload radio1')>=0))==1);
-print('Wi-Fi worker: failure restores station/source and keeps saved credentials; success saves profile and selects Wi-Fi; 7 radio release guards and independent 5 GHz reload passed\\n');
+// A pinned USB radio is used by scan, command validation and the worker.
+save(BASE+'/wifi-radio','radio2\\n');
+assert(!valid(pending));
+assert(!command({operation:'join',radio:'radio0',ssid:'test',encryption:'none',password:''}).ok);
+assert(!readfile(RUN+'/wifi-pending'));
+let found=scan();
+assert(found.ok && length(found.networks)==1 && found.networks[0].radio=='radio2');
+assert(length(scans)==1 && scans[0]=='radio2');
+pending.radio='radio2'; configuration.device='radio0'; configuration.disabled='1';
+commands=[];save(RUN+'/wifi-pending',sprintf('%J',pending));worker();
+assert(job().state=='connected' && configuration.device=='radio2');
+assert(length(filter(commands,c=>index(c,'wifi reload radio2')>=0))==1);
+assert(length(filter(commands,c=>index(c,'wifi reload radio0')>=0 || index(c,'wifi reload radio1')>=0))==0);
+// An unavailable pin must never fall back to the home radios.
+save(BASE+'/wifi-radio','radio9\\n'); scans=[];
+assert(!valid(pending)); assert(!scan().ok && length(scans)==0);
+print('Wi-Fi worker: rollback, saved credentials, release guards, independent reload and USB-only scan/join passed\\n');
 '''
 try:
     subprocess.run(ssh + ['cat > ' + shlex.quote(root + '/test.uc')], input=source.encode(), check=True)

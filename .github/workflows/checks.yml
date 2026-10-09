@@ -13,5 +13,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install Lua for TLS guard tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
       - run: sh tools/test.sh
       - run: git diff --check

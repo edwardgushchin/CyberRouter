@@ -5,6 +5,9 @@ python3 tests/test_recovery.py
 python3 tools/check-repository.py
 python3 components/xray/test_profiles.py
 node components/xray/test_luci_profile.cjs
+node components/xray/test_luci_routing.cjs
+lua components/zapret/test_guard.lua
+python3 components/zapret/test_configure.py
 sh components/mobile-backup/test-classifier.sh
 sh components/mobile-backup/test-controller.sh
 sh -n tools/capture-router.sh

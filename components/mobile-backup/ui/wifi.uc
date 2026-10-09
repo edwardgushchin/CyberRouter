@@ -23,8 +23,12 @@ function safe(p) { return {ssid:p.ssid,radio:p.radio,encryption:p.encryption}; }
 function job() { return read(RUN+'/wifi-state', {state:'idle'}); }
 function state(value, ssid) { save(RUN+'/wifi-state',sprintf('%J',{state:value,ssid:ssid||'',at:time()})); }
 function radioValid(r) { return type(r)=='string' && match(r,/^radio[0-9]+$/) && uci.get('wireless',r)=='wifi-device'; }
+function uplinkRadio(r) {
+    let selected=trim(readfile(BASE+'/wifi-radio')||'');
+    return radioValid(r) && (!selected || r==selected);
+}
 function valid(p) {
-    if(!radioValid(p.radio) || type(p.ssid)!='string' || length(p.ssid)<1 || length(p.ssid)>32 || match(p.ssid,/[[:cntrl:]]/)) return false;
+    if(!uplinkRadio(p.radio) || type(p.ssid)!='string' || length(p.ssid)<1 || length(p.ssid)>32 || match(p.ssid,/[[:cntrl:]]/)) return false;
     if(index(['none','psk2','sae','sae-mixed'],p.encryption)<0 || type(p.password)!='string')return false;
     if(p.encryption=='none')return p.password=='';
     return (length(p.password)>=8 && length(p.password)<=63 && !match(p.password,/[[:cntrl:]]/)) || (p.encryption=='psk2' && !!match(p.password,/^[0-9a-fA-F]{64}$/));
@@ -34,11 +38,12 @@ function wifiStatus() {
     return {ssid:s?.ssid||'',radio:s?.device||'',enabled:!!s && s.disabled!='1',connected:!!s && s.disabled!='1' && !!link.up, saved:map(profiles(),safe),job:job()};
 }
 function scan() {
-    let results=[], errors=[], own=[];
+    let results=[], errors=[], own=[], radios=0;
     uci.foreach('wireless','wifi-iface',s=>{if(s.mode=='ap')push(own,s.ssid);});
     uci.foreach('wireless','wifi-device',r=>{
         let radio=r['.name'];
-        if(!radioValid(radio) || r.disabled=='1')return;
+        if(!uplinkRadio(radio) || r.disabled=='1')return;
+        radios++;
         let reply=bus.call('iwinfo','scan',{device:radio});
         if(type(reply?.results)!='array'){push(errors,radio);return;}
         for(let n in reply.results){
@@ -52,7 +57,7 @@ function scan() {
         }
     });
     sort(results,(a,b)=>b.signal-a.signal);
-    return {ok:!length(errors)||length(results)>0,networks:results,errors};
+    return {ok:radios>0 && (!length(errors)||length(results)>0),networks:results,errors};
 }
 function restore(s, name) {
     uci.delete('wireless',name);
@@ -135,6 +140,7 @@ function command(p) {
         if(!length(found))return result(false,'Сеть не сохранена');
         p=found[0];
     }
+    if(!uplinkRadio(p.radio))return result(false,'Для подключения используйте выделенный Wi-Fi адаптер');
     if(!valid(p))return result(false,'Проверьте сеть и пароль: WPA2/WPA3 — 8–63 символа');
     // No reload for a working saved connection; selecting the source is enough.
     let s=wifiStatus();
@@ -153,14 +159,15 @@ try {
     else if(action=='release') out=releaseStation(ARGV[1]);
     else if(action=='command') out=command(json(stdin.read('all')));
     else if(action=='test'){
-        for(let enc in ['none','psk2','sae','sae-mixed'])assert(valid({radio:'radio0',ssid:'example',encryption:enc,password:enc=='none'?'':'12345678'}));
+        let radio=trim(readfile(BASE+'/wifi-radio')||'radio0');
+        for(let enc in ['none','psk2','sae','sae-mixed'])assert(valid({radio,ssid:'example',encryption:enc,password:enc=='none'?'':'12345678'}));
         for(let p in [
             {radio:'radio0;touch /tmp/injected',ssid:'x',encryption:'none',password:''},
-            {radio:'radio0',ssid:'',encryption:'none',password:''},
-            {radio:'radio0',ssid:'x\n',encryption:'none',password:''},
-            {radio:'radio0',ssid:'x',encryption:'psk2',password:'short'},
-            {radio:'radio0',ssid:'x',encryption:'enterprise',password:'12345678'},
-            {radio:'radio0',ssid:'x',encryption:'none',password:'unexpected'}
+            {radio,ssid:'',encryption:'none',password:''},
+            {radio,ssid:'x\n',encryption:'none',password:''},
+            {radio,ssid:'x',encryption:'psk2',password:'short'},
+            {radio,ssid:'x',encryption:'enterprise',password:'12345678'},
+            {radio,ssid:'x',encryption:'none',password:'unexpected'}
         ])assert(!valid(p));
         assert(same({radio:'r',ssid:'a',encryption:'x'},{radio:'r',ssid:'a',encryption:'x'}));
         assert(!same({radio:'r',ssid:'a',encryption:'x'},{radio:'s',ssid:'a',encryption:'x'}));

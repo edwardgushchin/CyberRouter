@@ -155,6 +155,17 @@ while [ "$attempt" -lt "$DIRECT_ATTEMPTS" ]; do
 done
 
 active_profile="$(sed -n '1p' "$ACTIVE_FILE" 2>/dev/null || true)"
+# Let client traffic finish zapret trials before committing a site to VPN.
+guard_state="$(awk -v host="$domain" -v now="$(date +%s)" \
+	'$2 == host && NF == 5 && $1 ~ /^[0-9]+$/ && now - $1 < 300 { print $3; exit }' \
+	/tmp/zapret-health/health 2>/dev/null || true)"
+case "$guard_state" in
+	suspect|trial|retry)
+		remember_until $((now + FAILED_COOLDOWN))
+		logger -t "$TAG" -p daemon.notice "Candidate $domain waits for client zapret trials before VPN verification"
+		exit 0
+		;;
+esac
 case "$active_profile" in
 	"$MAIN_NAME") probe_profile="$MAIN_PROFILE" ;;
 	"$BACKUP_NAME") probe_profile="$BACKUP_PROFILE" ;;

@@ -21,10 +21,88 @@ usage() {
 	echo "Usage: xray-route-domain add DOMAIN [auto|manual]" >&2
 	echo "       xray-route-domain remove DOMAIN [force]" >&2
 	echo "       xray-route-domain list" >&2
+	echo "       xray-route-domain set-domains REQUEST.json" >&2
 	echo "       xray-route-domain refilter refilter-SHA256.dat" >&2
+	echo "       xray-route-domain youtube-direct" >&2
+	echo "       xray-route-domain eresidency-direct" >&2
+	echo "       xray-route-domain eresidency-auto" >&2
+	echo "       xray-route-domain discord-direct" >&2
+	echo "       xray-route-domain discord-auto" >&2
 }
 
 update_profile() {
+	if [ "$command" = "set-domains" ]; then
+		"$TOOL" set-proxy-domains "$1" "$2" "$workdir/request.json"
+		return
+	fi
+	if [ "$command" = "eresidency-auto" ]; then
+		ucode - "$1" "$2" <<'UCODE'
+import { readfile, writefile } from 'fs';
+let document = json(readfile(ARGV[0]));
+document.routing.rules = filter(document.routing.rules, (rule) => rule.ruleTag != 'eresidency-direct');
+if (!writefile(ARGV[1], sprintf('%J\n', document))) die('Cannot write eResidency routing');
+UCODE
+		return
+	fi
+	if [ "$command" = "eresidency-direct" ]; then
+		ucode - "$1" "$2" <<'UCODE'
+import { readfile, writefile } from 'fs';
+let document = json(readfile(ARGV[0]));
+let rules = filter(document.routing.rules, (rule) => rule.ruleTag != 'eresidency-direct');
+document.routing.rules = [
+	{ type: 'field', ruleTag: 'eresidency-direct', outboundTag: 'direct',
+		domain: [ 'domain:eresidency.kz' ] }, ...rules ];
+if (!writefile(ARGV[1], sprintf('%J\n', document))) die('Cannot write eResidency routing');
+UCODE
+		return
+	fi
+	if [ "$command" = "discord-auto" ]; then
+		ucode - "$1" "$2" <<'UCODE'
+import { readfile, writefile } from 'fs';
+let document = json(readfile(ARGV[0]));
+document.routing.rules = filter(document.routing.rules, (rule) => rule.ruleTag != 'discord-direct');
+if (!writefile(ARGV[1], sprintf('%J\n', document))) die('Cannot write Discord routing');
+UCODE
+		return
+	fi
+	if [ "$command" = "discord-direct" ]; then
+		ucode - "$1" "$2" <<'UCODE'
+import { readfile, writefile } from 'fs';
+let document = json(readfile(ARGV[0]));
+let rules = filter(document.routing.rules, (rule) => rule.ruleTag != 'discord-direct');
+document.routing.rules = [
+	{ type: 'field', ruleTag: 'discord-direct', outboundTag: 'direct', domain: [
+		'domain:discord.com', 'domain:discord.gg', 'domain:discordapp.com',
+		'domain:discordapp.net', 'domain:discord.media', 'domain:discordcdn.com',
+		'domain:discordstatus.com', 'domain:dis.gd' ] }, ...rules ];
+if (!writefile(ARGV[1], sprintf('%J\n', document))) die('Cannot write Discord routing');
+UCODE
+		return
+	fi
+	if [ "$command" = "youtube-direct" ]; then
+		ucode - "$1" "$2" <<'UCODE'
+import { readfile, writefile } from 'fs';
+let document = json(readfile(ARGV[0]));
+let rules = filter(document.routing.rules, (rule) =>
+	rule.ruleTag != 'youtube-avatars-proxy' && rule.ruleTag != 'youtube-direct');
+// These owner-selected routes precede both learned domains and Re:filter.
+document.routing.rules = [
+	{ type: 'field', ruleTag: 'youtube-avatars-proxy', outboundTag: 'proxy', domain: [
+		'domain:yt3.ggpht.com', 'domain:yt4.ggpht.com',
+		'domain:yt3.googleusercontent.com', 'domain:yt4.googleusercontent.com' ] },
+	{ type: 'field', ruleTag: 'youtube-direct', outboundTag: 'direct', domain: [
+		'domain:youtube.com', 'domain:googlevideo.com', 'domain:ytimg.com',
+		'domain:youtu.be', 'domain:youtube-nocookie.com', 'domain:yt.be',
+		'domain:youtubekids.com', 'domain:youtubeeducation.com',
+		'domain:youtubei.googleapis.com', 'domain:youtube.googleapis.com',
+		'domain:youtubeembeddedplayer.googleapis.com', 'domain:youtube-ui.l.google.com' ] },
+	...rules
+];
+if (!writefile(ARGV[1], sprintf('%J\n', document)))
+	die('Cannot write YouTube routing');
+UCODE
+		return
+	fi
 	if [ "$command" != "refilter" ]; then
 		"$TOOL" "$tool_command" "$1" "$2" "$token"
 		return
@@ -102,7 +180,7 @@ restore_configs() {
 	install_config "$workdir/original-backup.json" "$backup_stage" "$BACKUP_PROFILE"
 	install_config "$workdir/original-backup2.json" "$backup2_stage" "$BACKUP2_PROFILE"
 	install_config "$workdir/original-live.json" "$live_stage" "$LIVE_CONFIG"
-	if ! xray api adrules --server="$ROUTE_API" "$workdir/original-live.json" \
+	if ! xray api adrules --timeout=30 --server="$ROUTE_API" "$workdir/original-live.json" \
 		>"$workdir/api-restore.log" 2>&1; then
 		logger -t "$TAG" -p daemon.err "Route rollback API unavailable; saved configs restored, runtime requires checking"
 	fi
@@ -137,12 +215,21 @@ if [ "$command" = "list" ]; then
 	exit 0
 fi
 
-[ "$command" = "add" ] || [ "$command" = "remove" ] || [ "$command" = "refilter" ] || {
+[ "$command" = "add" ] || [ "$command" = "remove" ] || [ "$command" = "set-domains" ] || [ "$command" = "refilter" ] || [ "$command" = "youtube-direct" ] || [ "$command" = "eresidency-direct" ] || [ "$command" = "eresidency-auto" ] || [ "$command" = "discord-direct" ] || [ "$command" = "discord-auto" ] || {
 	usage
 	exit 2
 }
 
-if [ "$command" = "refilter" ]; then
+if [ "$command" = "set-domains" ]; then
+	[ "$#" = 2 ] && [ -f "$2" ] || { usage; exit 2; }
+	request_file="$2"
+	domain="proxy-list"
+	token=""
+elif [ "$command" = "youtube-direct" ] || [ "$command" = "eresidency-direct" ] || [ "$command" = "eresidency-auto" ] || [ "$command" = "discord-direct" ] || [ "$command" = "discord-auto" ]; then
+	[ "$#" = 1 ] || { usage; exit 2; }
+	domain="$command"
+	token=""
+elif [ "$command" = "refilter" ]; then
 	domain="${2:-}"
 	printf '%s\n' "$domain" | grep -Eq '^refilter-[a-f0-9]{64}\.dat$' || exit 2
 	[ -s "$XRAY_LOCATION_ASSET/$domain" ] || exit 2
@@ -157,7 +244,7 @@ fi
 source="${3:-manual}"
 
 case "$command:$source" in
-	add:auto|add:manual|remove:force|refilter:manual) ;;
+	add:auto|add:manual|remove:force|set-domains:manual|refilter:manual|youtube-direct:manual|eresidency-direct:manual|eresidency-auto:manual|discord-direct:manual|discord-auto:manual) ;;
 	remove:manual)
 		if ! grep -Fxq "$domain" "$AUTO_LIST" 2>/dev/null; then
 			echo "Refusing to remove a domain not learned automatically; use force if intentional." >&2
@@ -206,6 +293,7 @@ list_stage="${AUTO_LIST}.route-new.$$"
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+[ "$command" != "set-domains" ] || cp "$request_file" "$workdir/request.json"
 cp "$MAIN_PROFILE" "$workdir/original-main.json"
 cp "$BACKUP_PROFILE" "$workdir/original-backup.json"
 cp "$BACKUP2_PROFILE" "$workdir/original-backup2.json"
@@ -257,7 +345,7 @@ if [ "$configs_changed" = "1" ]; then
 
 	# Replace the complete ordered routing table; keep existing sessions alive.
 	# No restart fallback: an unavailable API must not disconnect the whole LAN.
-	if ! xray api adrules --server="$ROUTE_API" "$LIVE_CONFIG" \
+	if ! xray api adrules --timeout=30 --server="$ROUTE_API" "$LIVE_CONFIG" \
 		>"$workdir/api-update.log" 2>&1; then
 		echo "Xray route API failed; restoring saved and runtime routing." >&2
 		exit 1

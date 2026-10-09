@@ -2,6 +2,7 @@
 'require view';
 'require fs';
 'require ui';
+'require poll';
 
 var SCRIPT = '/usr/bin/xray-profile';
 
@@ -28,11 +29,19 @@ function parseStatus(text) {
 	var status = {
 		recorded: '',
 		detected: '',
-		services: []
+		services: [],
+		health: [], guard: 'waiting'
 	};
 
 	String(text || '').replace(/\r/g, '').split('\n').forEach(function(line) {
 		var match;
+		match = line.match(/^TLS guard: (active|waiting)$/);
+		if (match) { status.guard = match[1]; return; }
+		match = line.match(/^TLS health: (\d+) ([a-z0-9][a-z0-9.-]*[a-z0-9]) (observing|confirmed|suspect|trial|unresolved|retry|fallback) (zapret|split|direct|vpn) (\d+)$/);
+		if (match) {
+			status.health.push({ time: Number(match[1]), host: match[2], state: match[3], mode: match[4], failures: Number(match[5]) });
+			return;
+		}
 
 		match = line.match(/^Recorded active profile:\s*(.+)$/);
 		if (match) {
@@ -162,10 +171,38 @@ return view.extend({
 		while (this.outputNode.firstChild)
 			this.outputNode.removeChild(this.outputNode.firstChild);
 
-		this.outputNode.appendChild(outputBlock(text || ''));
+		this.outputNode.appendChild(outputBlock(String(text || '').replace(/main-(?:\d{1,3}\.){3}\d{1,3}/g, 'main')));
 	},
 
 	updateStatus: function(status) {
+		var healthSnapshot = JSON.stringify([ status.guard, status.health ]);
+		if (this.healthNode && this.healthSnapshot !== healthSnapshot) {
+			this.healthSnapshot = healthSnapshot;
+			while (this.healthNode.firstChild) this.healthNode.removeChild(this.healthNode.firstChild);
+			this.healthNode.appendChild(E('p', {}, status.guard === 'active'
+				? tr('TLS monitoring is active.', 'Наблюдение TLS включено.')
+				: tr('TLS monitoring is unavailable. Observations below may be stale.', 'Наблюдение TLS недоступно. Сведения ниже могут быть устаревшими.')));
+			var modes = { zapret: 'zapret', split: tr('zapret: segmentation', 'zapret: сегментация'), direct: tr('Direct', 'Прямое соединение'), vpn: tr('VPN fallback', 'VPN после проверки') };
+			var states = {
+				observing: tr('Waiting for TLS outcome', 'Ожидается результат TLS'),
+				confirmed: tr('TLS continued', 'TLS-соединение продолжено'),
+				suspect: tr('Connection failure observed', 'Замечен сбой соединения'),
+				trial: tr('Repeated failures; testing an alternative', 'Повторные сбои; проверяется альтернатива'),
+				unresolved: tr('All three paths failed; investigation needed', 'Три способа дали сбои; нужна проверка'),
+				retry: tr('Retrying the preferred strategy', 'Повторная проверка основной стратегии'),
+				fallback: tr('The complete resource succeeded through VPN after direct failures', 'Ресурс целиком загрузился через VPN после прямых сбоев')
+			};
+			if (!status.health.length) this.healthNode.appendChild(E('p', {}, tr('No TLS observations yet.', 'Наблюдений TLS пока нет.')));
+			status.health.forEach(function(item) {
+				this.healthNode.appendChild(E('div', {
+					'class': /^(suspect|trial|unresolved)$/.test(item.state) ? 'alert-message warning' : '',
+					'style': 'padding:8px 0;border-bottom:1px solid var(--border-color,#8884)' }, [
+					E('strong', {}, item.host + ' — ' + modes[item.mode]),
+					E('div', {}, states[item.state] + (item.failures ? ' (' + item.failures + ')' : '') + ' · ' +
+						(item.time ? new Date(item.time * 1000).toLocaleString() : '—'))
+				]));
+			}, this);
+		}
 		if (this.recordedNode)
 			this.recordedNode.textContent = profileLabel(status.recorded);
 
@@ -197,6 +234,8 @@ return view.extend({
 		var detectedNode = E('strong');
 		var servicesNode = E('tbody');
 		var outputNode = E('div');
+		var healthNode = E('div', { 'role': 'status', 'aria-live': 'polite' });
+		this.healthNode = healthNode;
 
 		this.recordedNode = recordedNode;
 		this.detectedNode = detectedNode;
@@ -205,6 +244,14 @@ return view.extend({
 
 		this.updateStatus(status);
 		this.setOutput(res && res.stderr ? res.stderr : (res && res.stdout));
+		poll.add(L.bind(function() {
+			return execProfile([ 'status' ]).then(L.bind(function(next) {
+				this.updateStatus(parseStatus(next.stdout));
+			}, this)).catch(L.bind(function() {
+				this.healthSnapshot = null;
+				if (this.healthNode.firstChild) this.healthNode.firstChild.textContent = tr('Could not refresh connection status.', 'Не удалось обновить состояние соединений.');
+			}, this));
+		}, this), 15);
 
 		return E([], [
 			E('h2', {}, tr('Xray Profile', 'Профиль Xray')),
@@ -256,6 +303,14 @@ return view.extend({
 					'Automatic priority: main → Netherlands → Germany. While the watchdog is running, a manually selected backup returns to the main profile after three successful recovery checks.',
 					'Порядок автоматики: основной → Нидерланды → Германия. Пока автоматика активна, после ручного выбора резерва она вернёт основной профиль, когда он пройдёт три проверки восстановления.'
 				))
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, tr('Website connections', 'Соединения с сайтами')),
+				E('p', {}, tr('Preference: configured zapret → zapret segmentation → direct. VPN is used only for a resource that failed directly and passed the full VPN check.',
+					'Приоритет: текущий zapret → сегментация zapret → прямое соединение. VPN включается только для ресурса, который не загрузился напрямую и прошёл полную проверку через VPN.')),
+				E('p', { 'class': 'cbi-section-descr' }, tr('Updates every 15 seconds. TLS observations do not verify page contents, HTTP errors, QUIC or calls.',
+					'Обновление каждые 15 секунд. Эти наблюдения не проверяют содержимое страниц, ошибки HTTP, QUIC и звонки.')),
+				healthNode
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, tr('Command output', 'Вывод команды')),

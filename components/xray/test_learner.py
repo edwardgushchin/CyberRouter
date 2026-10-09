@@ -193,6 +193,16 @@ echo "profile $1" >>"$CALLS"
         assert calls.read_text().count(f'profile {root}/etc/xray/profiles/{active}.json') == 2
         assert 'route add example.com auto' in calls.read_text()
     (root / 'etc/xray/active-profile').write_text('main-test')
+    health = root / 'tmp/zapret-health/health'
+    health.parent.mkdir()
+    for phase in ('suspect', 'trial', 'retry', 'unresolved'):
+        health.write_text(f'{int(time.time())} example.com {phase} split 0\n')
+        state.unlink(missing_ok=True)
+        calls.write_text('')
+        env['SCENARIO'] = 'root'
+        assert run(['sh', str(root / 'candidate'), 'example.com'], env=env).returncode == 0
+        assert ('route add' in calls.read_text()) == (phase == 'unresolved'), phase
+    health.unlink()
     # Legacy six-hour success must be rechecked once using the new probe.
     state.write_text(str(int(time.time()) + 21600) + '\n')
     calls.write_text('')

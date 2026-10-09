@@ -1,0 +1,55 @@
+{
+  "filesystem_reconstruction": "passed",
+  "entries": 3200,
+  "files": 2388,
+  "links": 437,
+  "checked": [
+    "file bytes (SHA-256)",
+    "path set",
+    "symlink targets",
+    "mode",
+    "uid",
+    "gid",
+    "base deletions"
+  ],
+  "physical_factory_restore": "not performed",
+  "snapshot_authenticated": true,
+  "captured_at": "2026-09-10T13:07:26+03:00",
+  "package_count": 206,
+  "captured_code_matches_sources": {
+    "components/zapret/cyberguard.lua": "9eb82fa8e2e2ad722a69aa6fbb7a4d15b9c096c0b5ff9f4dde73fa2be439b102",
+    "components/xray/xray-route-domain": "2ae4b92c5fd62eb09f59ab5b15094d88d5bc187b4b476230980c900ac33ee319",
+    "components/xray/xray-route-learn-candidate": "a1df539fff62af78584b14b4d5d803ea2affb88190c9746354e5498349248f67",
+    "components/xray/xray-profile": "8e5e982abb5393501fd6e90a19b1ad457663e663b0a0c98a93effc6ebf3c",
+    "components/xray/luci-profile.js": "112240dac0dfb3e925509da6344133bdf521f6e4e2acc5c412bf0d8d7c21fe20"
+  },
+  "live_checks": {
+    "discord_home_rendered_in_chrome": true,
+    "discord_login_rendered_in_chrome": true,
+    "discord_blocking_asset_direct": [
+      "timeout after 20495/85753 bytes",
+      "timeout after 19507/85753 bytes"
+    ],
+    "discord_blocking_asset_forced_xray": "2/2 complete",
+    "discord_blocking_asset_after_route": [
+      "85753 bytes in 0.819 seconds",
+      "85753 bytes in 0.817 seconds"
+    ],
+    "youtube_page_and_player_present": true,
+    "youtube_timeline_seconds": 2087,
+    "xray_pid_preserved": true,
+    "home_ap_ifindices_preserved": true
+  },
+  "final_routing": {
+    "discord_forced_direct_rule": false,
+    "vpn_fallback_domains_added_for_discord_page": [
+      "cdn.localizeapi.com"
+    ],
+    "youtube_direct_rule_preserved": true
+  },
+  "limitations": [
+    "Discord voice, bidirectional audio, and screen-stream send/receive are deferred until a second participant is available",
+    "TLS observations cannot verify encrypted page contents, HTTP errors, QUIC, voice, or streams",
+    "Physical factory restore was not performed"
+  ]
+}

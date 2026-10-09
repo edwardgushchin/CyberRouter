@@ -1,0 +1,46 @@
+{
+  "filesystem_reconstruction": "passed",
+  "entries": 3167,
+  "files": 2359,
+  "links": 437,
+  "checked": [
+    "file bytes (SHA-256)",
+    "path set",
+    "symlink targets",
+    "mode",
+    "uid",
+    "gid",
+    "base deletions"
+  ],
+  "physical_factory_restore": "not performed",
+  "snapshot_authenticated": true,
+  "package_count": 206,
+  "driver": "mt7601u",
+  "usb_id": "148f:7601",
+  "uplink_radio": "radio2",
+  "saved_profile_credentials_preserved": true,
+  "captured_code_matches_sources": {
+    "components/mobile-backup/ui/wifi.uc": "759368957f3d7cd010df8552044a9ef49c40926d7cc9da6568fc1dbd1be8bd2a",
+    "components/mobile-backup/ui/dashboard.js": "56e2645d3d754cc7f9e0e2737270fb8b9a0a84f4bb2273a566f83795b422750c"
+  },
+  "final_source": "wan",
+  "home_wifi_continuity": {
+    "seconds": 455,
+    "clients_2g": 11,
+    "clients_5g": 5,
+    "missing": 0,
+    "reconnected": 0,
+    "ap_ifindex_unchanged": true
+  },
+  "mobile_https": {
+    "router_example_com": 200,
+    "router_gstatic": 204,
+    "lan_gstatic": 204,
+    "lan_telegram": 200
+  },
+  "limitations": [
+    "LAN example.com and api.ipify.org timed out through both phone and wired uplinks; cause not established",
+    "LAN and USB public exit IP comparison not confirmed",
+    "Long-term USB stability and physical restore not tested"
+  ]
+}

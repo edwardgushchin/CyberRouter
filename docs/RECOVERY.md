@@ -9,7 +9,7 @@
 ```bash
 mkdir -m 700 -p private
 install -m 600 /путь/к/сохраненному/recovery.key private/recovery.key
-python tools/cyberrouter.py open snapshots/2026-09-09 --output private/recovery
+python tools/cyberrouter.py open snapshots/2026-09-10-zapret-guard --output private/recovery
 python tools/cyberrouter.py prepare private/recovery/capture --output private/restore
 python tools/verify-recovery.py private/recovery/capture private/restore
 ```

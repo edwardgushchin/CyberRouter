@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "created_at": "2026-09-09T20:22:44.729229+00:00",
+  "board": "glinet,gl-mt6000",
+  "model": "GL.iNet GL-MT6000",
+  "release": "25.12.2",
+  "revision": "r32802-f505120278",
+  "kernel": "6.12.74",
+  "target": "mediatek/filogic",
+  "encrypted_sha256": "0b23025f7ee97e75f4fe7157e700ba7683c580b371a9001a1a532860277830dd",
+  "parts": [
+    {
+      "file": "payload.gpg.part0000",
+      "bytes": 50331648,
+      "sha256": "57680d39b3e6abd8b0f8d6bf64549aab827e613bdca2a49e1eb531042a62f0b4"
+    },
+    {
+      "file": "payload.gpg.part0001",
+      "bytes": 50331648,
+      "sha256": "d53a0bfe335c6cf506555124fd9691e5ffcec19f5bef64f31c05d809fe72d7b7"
+    },
+    {
+      "file": "payload.gpg.part0002",
+      "bytes": 45348947,
+      "sha256": "8725d31402a1e0a93438f9b82ad2d2c1abca2faea62c468223558bdde62237ee"
+    }
+  ],
+  "package_count": 204,
+  "includes_local_history": false
+}
